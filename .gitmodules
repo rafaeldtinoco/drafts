@@ -1,0 +1,6 @@
+[submodule "libbpf"]
+	path = 3rdparty/libbpf
+	url = git@github.com:libbpf/libbpf.git
+[submodule "libbpfgo"]
+	path = 3rdparty/libbpfgo
+	url = git@github.com:aquasecurity/libbpfgo.git
