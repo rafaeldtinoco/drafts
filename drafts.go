@@ -39,19 +39,31 @@ const (
 	EventTpSync
 	EventTpOpenat
 	EventTpOpenatExit
-	EventCgroupSocket
+	EventCgroupSocketCreate
+	EventCgroupSocketRelease
+	EventCgroupSocketPostBind4
+	EventCgroupSockAddrBind4
+	EventCgroupSockAddrSendmsg4
+	EventCgroupSockAddrRecvmsg4
+	EventCgroupSkbIngress
 	EventCgroupSkbEgress
 )
 
 func NewEventType(eventNum uint32) EventType {
 	m := map[uint32]EventType{
-		1: EventKprobeSync,
-		2: EventKprobeSyncMap,
-		3: EventTpSync,
-		4: EventTpOpenat,
-		5: EventTpOpenatExit,
-		6: EventCgroupSocket,
-		7: EventCgroupSkbEgress,
+		1:  EventKprobeSync,
+		2:  EventKprobeSyncMap,
+		3:  EventTpSync,
+		4:  EventTpOpenat,
+		5:  EventTpOpenatExit,
+		6:  EventCgroupSocketCreate,
+		7:  EventCgroupSocketRelease,
+		8:  EventCgroupSocketPostBind4,
+		9:  EventCgroupSockAddrBind4,
+		10: EventCgroupSockAddrSendmsg4,
+		11: EventCgroupSockAddrRecvmsg4,
+		12: EventCgroupSkbIngress,
+		13: EventCgroupSkbEgress,
 	}
 
 	return m[eventNum]
@@ -59,13 +71,19 @@ func NewEventType(eventNum uint32) EventType {
 
 func (e EventType) String() string {
 	m := map[EventType]string{
-		EventKprobeSync:      "Kprobe Sync Event",
-		EventKprobeSyncMap:   "Kprobe Sync Event From Hashmap",
-		EventTpSync:          "Tracepoint Sync Event",
-		EventTpOpenat:        "Tracepoint Openat Event",
-		EventTpOpenatExit:    "Tracepoint Openat(Exit) Event",
-		EventCgroupSocket:    "Socket Created/Released",
-		EventCgroupSkbEgress: "Network Packet Sent",
+		EventKprobeSync:             "Kprobe Sync Event",
+		EventKprobeSyncMap:          "Kprobe Sync Event From Hashmap",
+		EventTpSync:                 "Tracepoint Sync Event",
+		EventTpOpenat:               "Tracepoint Openat Event",
+		EventTpOpenatExit:           "Tracepoint Openat(Exit) Event",
+		EventCgroupSocketCreate:     "Socket Created",
+		EventCgroupSocketRelease:    "Socket Released",
+		EventCgroupSocketPostBind4:  "Socket PostBind4",
+		EventCgroupSockAddrBind4:    "Socket Bind4",
+		EventCgroupSockAddrSendmsg4: "Sendmsg4",
+		EventCgroupSockAddrRecvmsg4: "Recvmsg4",
+		EventCgroupSkbIngress:       "Network Packet Received",
+		EventCgroupSkbEgress:        "Network Packet Sent",
 	}
 
 	return m[e]
@@ -75,21 +93,28 @@ func (e EventType) String() string {
 // data structure sent from kernel to userland (add more types as needed)
 //
 
-// data the way eBPF programs see
+// data the way eBPF programs see (net_info is all zeroed for non network events)
 type data struct {
 	// task_info struct
-	StartTime uint64   // 08 bytes: 000-063 : task start time
-	Pid       uint32   // 04 bytes: 064-095 : host process id
-	Tgid      uint32   // 04 bytes: 096-127: host thread group id
-	Ppid      uint32   // 04 bytes: 128-159: host parent process id
-	Uid       uint32   // 04 bytes: 160-191: user id
-	Gid       uint32   // 04 bytes: 192-223: group id
-	Comm      [16]byte // 16 bytes: 224-351: command (task_comm_len)
-	Padding   uint32   // 04 bytes: 352-383: padding/empty
-	// end of task_info struct
-	EventType      uint32 // 04 bytes: 384-415: eBPF program that generated event
-	Padding2       uint32 // 04 bytes: 416-447: padding/empty
-	EventTimestamp uint64 // 08 bytes: 448-512: event timestamp
+	StartTime      uint64   // 08 bytes: 000-063: TASK_INFO BEGIN, task start time
+	Pid            uint32   // 04 bytes: 064-095: host process id
+	Tgid           uint32   // 04 bytes: 096-127: host thread group id
+	Ppid           uint32   // 04 bytes: 128-159: host parent process id
+	Uid            uint32   // 04 bytes: 160-191: user id
+	Gid            uint32   // 04 bytes: 192-223: group id
+	Comm           [16]byte // 16 bytes: 224-351: command (task_comm_len)
+	Padding        uint32   // 04 bytes: 352-383: TASK_INFO END, padding/empty
+	EventType      uint32   // 04 bytes: 384-415: eBPF program that generated event
+	Padding2       uint32   // 04 bytes: 416-447: padding/empty
+	EventTimestamp uint64   // 08 bytes: 448-512: event timestamp
+	Family         uint32   // 04 bytes: 513-544: NET_INFO BEGIN, socket family
+	Type           uint32   // 04 bytes: 545-576: socket type
+	Protocol       uint32   // 04 bytes: 577-608: socket protocol
+	IPv4Src        uint32   // 04 bytes: 609-640: ipv4 source address
+	IPv4Dst        uint32   // 04 bytes: 641-672: ipv4 dest address
+	PortSrc        uint16   // 04 bytes: 673-704: source port
+	PortDst        uint16   // 04 bytes: 705-736: dest port
+	SocketCookie   uint64   // 08 bytes: 737-800: NET_INFO END, socket cookie
 }
 
 // data the way userland golang program sees
@@ -103,6 +128,27 @@ type goData struct {
 	Comm           string
 	EventType      EventType
 	EventTimestamp uint
+}
+
+// data the way userland golang program sees for network related events
+type goNetData struct {
+	StartTime      uint
+	Pid            uint
+	Tgid           uint
+	Ppid           uint
+	Uid            uint
+	Gid            uint
+	Comm           string
+	EventType      EventType
+	EventTimestamp uint
+	Family         uint
+	Type           uint
+	Protocol       uint
+	IPv4Src        uint
+	IPv4Dst        uint
+	PortSrc        uint
+	PortDst        uint
+	SocketCookie   uint
 }
 
 // TODO: check padding and pick elem from userland, delete elem from map
@@ -160,7 +206,7 @@ func main() {
 	}
 
 	// ... and resize it (default: 1024) before loading eBPF object into kernel
-	err = bpfMapEvents.Resize(10240) // 10k events possible in perf buffer map
+	err = bpfMapEvents.Resize(10240 * 100) // 1000k events possible in perf buffer map
 	if err != nil {
 		Error(err)
 	}
@@ -173,12 +219,18 @@ func main() {
 	// enable/disable events
 
 	AllEvents := map[EventType]bool{
-		EventKprobeSync:      true, // EventKprobeSyncMap set EventKprobeSync
-		EventTpSync:          true,
-		EventTpOpenat:        true, // Real event is at OpenatExit
-		EventTpOpenatExit:    true, // Needs both TpOpenAt events to be enabled
-		EventCgroupSocket:    false,
-		EventCgroupSkbEgress: false,
+		EventKprobeSync:             false, // EventKprobeSyncMap set EventKprobeSync
+		EventTpSync:                 true,
+		EventTpOpenat:               false, // Real event is at OpenatExit
+		EventTpOpenatExit:           false, // Needs both TpOpenAt events to be enabled
+		EventCgroupSocketCreate:     true,
+		EventCgroupSocketRelease:    true,
+		EventCgroupSocketPostBind4:  true,
+		EventCgroupSockAddrBind4:    true,
+		EventCgroupSockAddrSendmsg4: true,
+		EventCgroupSockAddrRecvmsg4: true,
+		EventCgroupSkbIngress:       true,
+		EventCgroupSkbEgress:        true,
 	}
 
 	bpfMapEnabled, err := bpfModule.GetMap("enabled")
@@ -195,13 +247,13 @@ func main() {
 	}
 
 	////
-	//// EXAMPLES: eBPF program types (big monolithic on purpose for now)
+	//// EXAMPLES: eBPF program types (monolithic for educational purposes)
 	////
-
-	//// EventKprobeSync ------------------------------------------------------
 
 	// BPF_PROG_TYPE_KPROBE:
 	// sync (SYSCALL_DEFINE0(sync) at sync.c)
+
+	//// EventKprobeSync ------------------------------------------------------
 
 	bpfProgKprobeSync, err := bpfModule.GetProgram("ksys_sync")
 	if err != nil {
@@ -219,10 +271,10 @@ func main() {
 		Error(err)
 	}
 
-	//// EventTpSync ----------------------------------------------------------
-
 	// BPF_PROG_TYPE_TRACEPOINT
 	// sys_enter_sync (/sys/kernel/debug/tracing/events/syscalls/sys_enter_sync)
+
+	//// EventTpSync ----------------------------------------------------------
 
 	bpfProgTpSync, err := bpfModule.GetProgram("tracepoint__syscalls__sys_enter_sync")
 	if err != nil {
@@ -237,10 +289,11 @@ func main() {
 		Error(err)
 	}
 
-	//// EventTpOpenat, EventTpOpenatExit -------------------------------------
-
 	// BPF_PROG_TYPE_TRACEPOINT
 	// sys_enter_openat (/sys/kernel/debug/tracing/events/syscalls/sys_enter_openat)
+	// sys_exit_openat (/sys/kernel/debug/tracing/events/syscalls/sys_exit_openat)
+
+	//// EventTpOpenat ---------------------------------------------------------
 
 	bpfProgTpOpenat, err := bpfModule.GetProgram("tracepoint__syscalls__sys_enter_openat")
 	if err != nil {
@@ -260,8 +313,7 @@ func main() {
 		Error(err)
 	}
 
-	// BPF_PROG_TYPE_TRACEPOINT
-	// sys_exit_openat (/sys/kernel/debug/tracing/events/syscalls/sys_exit_openat)
+	//// EventTpOpenatExit -----------------------------------------------------
 
 	bpfProgTpOpenatExit, err := bpfModule.GetProgram("tracepoint__syscalls__sys_exit_openat")
 	if err != nil {
@@ -276,25 +328,100 @@ func main() {
 		Error(err)
 	}
 
-	//// EventCgroupSocket ----------------------------------------------------
-
-	// BPF_PROG_TYPE_CGROUP_SOCK (https://github.com/aquasecurity/libbpfgo/pull/196)
+	// BPF_PROG_TYPE_CGROUP_SOCK
 	// cgroupv2 directory (/sys/fs/cgroup/unified for root cgroup directory)
 
-	bpfProgSocket, err := bpfModule.GetProgram("cgroup__socket_create")
+	//// EventCgroupSocketCreate -----------------------------------------------
+
+	bpfProgSocketCreate, err := bpfModule.GetProgram("cgroup__sock_create")
 	if err != nil {
 		Error(err)
 	}
 
-	bpfLinkSocket, err := bpfProgSocket.AttachCgroup(cgroupRootDir)
+	bpfLinkSocketCreate, err := bpfProgSocketCreate.AttachCgroup(cgroupRootDir)
+	if err != nil {
+		Error(err)
+	}
+
+	//// EventCgroupSocketRelease ----------------------------------------------
+
+	bpfProgSocketRelease, err := bpfModule.GetProgram("cgroup__sock_release")
+	if err != nil {
+		Error(err)
+	}
+
+	bpfLinkSocketRelease, err := bpfProgSocketRelease.AttachCgroup(cgroupRootDir)
+	if err != nil {
+		Error(err)
+	}
+
+	//// EventCgroupSocketPostBind4 --------------------------------------------
+
+	bpfProgSocketPostBind4, err := bpfModule.GetProgram("cgroup__sock_post_bind4")
+	if err != nil {
+		Error(err)
+	}
+
+	bpfLinkSocketPostBind4, err := bpfProgSocketPostBind4.AttachCgroup(cgroupRootDir)
+	if err != nil {
+		Error(err)
+	}
+
+	// BPF_PROG_TYPE_CGROUP_SOCK_ADDR
+	// cgroupv2 directory (/sys/fs/cgroup/unified for root cgroup directory)
+
+	//// EventCgroupSockAddrBind4 ----------------------------------------------
+
+	bpfProgSockAddrBind4, err := bpfModule.GetProgram("cgroup__sock_addr_bind4")
+	if err != nil {
+		Error(err)
+	}
+
+	bpfLinkSockAddrBind4, err := bpfProgSockAddrBind4.AttachCgroup(cgroupRootDir)
+	if err != nil {
+		Error(err)
+	}
+
+	//// EventCgroupSockAddrSendmsg4 -------------------------------------------
+
+	bpfProgSockAddrSendmsg4, err := bpfModule.GetProgram("cgroup__sock_addr_sendmsg4")
+	if err != nil {
+		Error(err)
+	}
+
+	bpfLinkSockAddrSendmsg4, err := bpfProgSockAddrSendmsg4.AttachCgroup(cgroupRootDir)
+	if err != nil {
+		Error(err)
+	}
+
+	//// EventCgroupSockAddrRecvmsg4 -------------------------------------------
+
+	bpfProgSockAddrRecvmsg4, err := bpfModule.GetProgram("cgroup__sock_addr_recvmsg4")
+	if err != nil {
+		Error(err)
+	}
+
+	bpfLinkSockAddrRecvmsg4, err := bpfProgSockAddrRecvmsg4.AttachCgroup(cgroupRootDir)
+	if err != nil {
+		Error(err)
+	}
+
+	// BPF_PROG_TYPE_CGROUP_SKB (egress)
+	// cgroupv2 directory (/sys/fs/cgroup/unified for root cgroup directory)
+
+	//// EventCgroupSkbIngress -------------------------------------------------
+
+	bpfProgSkbIngress, err := bpfModule.GetProgram("cgroup__skb_ingress")
+	if err != nil {
+		Error(err)
+	}
+
+	bpfLinkSkbIngress, err := bpfProgSkbIngress.AttachCgroup(cgroupRootDir)
 	if err != nil {
 		Error(err)
 	}
 
 	//// EventCgroupSkbEgress -------------------------------------------------
-
-	// BPF_PROG_TYPE_CGROUP_SKB (egress)
-	// cgroupv2 directory (/sys/fs/cgroup/unified for root cgroup directory)
 
 	bpfProgSkbEgress, err := bpfModule.GetProgram("cgroup__skb_egress")
 	if err != nil {
@@ -377,6 +504,26 @@ LOOP:
 
 				dataFromMap := parseOpenAtValue(dataRawFromMap)
 				printOpenAtValue(dataFromMap)
+
+			case EventCgroupSkbIngress:
+				netData := parseNetEvent(dataRaw)
+				printNetEvent(netData)
+				// Example how to process payload (after event structure):
+				//
+				// obtaining the packet payload right after event
+				// packet := gopacket.NewPacket(
+				// 	dataRaw[64:],
+				// 	layers.LayerTypeIPv4,
+				// 	gopacket.Default,
+				// )
+				// if packet == nil {
+				// 	Warning(fmt.Errorf("could not parse the packet"))
+				// 	continue
+				// }
+				// fmt.Printf("%s", packet.Dump())
+			case EventCgroupSkbEgress:
+				netData := parseNetEvent(dataRaw)
+				printNetEvent(netData)
 			}
 
 		case lostEvents := <-lostChannel:
@@ -391,12 +538,18 @@ LOOP:
 	fmt.Println("Cleaning up")
 
 	errors := map[EventType]error{
-		EventKprobeSync:      bpfLinkKprobeSync.Destroy(),
-		EventTpSync:          bpfLinkTpSync.Destroy(),
-		EventTpOpenat:        bpfLinkTpOpenat.Destroy(),
-		EventTpOpenatExit:    bpfLinkTpOpenatExit.Destroy(),
-		EventCgroupSocket:    bpfLinkSocket.Destroy(),
-		EventCgroupSkbEgress: bpfLinkSkbEgress.Destroy(),
+		EventKprobeSync:             bpfLinkKprobeSync.Destroy(),
+		EventTpSync:                 bpfLinkTpSync.Destroy(),
+		EventTpOpenat:               bpfLinkTpOpenat.Destroy(),
+		EventTpOpenatExit:           bpfLinkTpOpenatExit.Destroy(),
+		EventCgroupSocketCreate:     bpfLinkSocketCreate.Destroy(),
+		EventCgroupSocketRelease:    bpfLinkSocketRelease.Destroy(),
+		EventCgroupSocketPostBind4:  bpfLinkSocketPostBind4.Destroy(),
+		EventCgroupSockAddrBind4:    bpfLinkSockAddrBind4.Destroy(),
+		EventCgroupSockAddrSendmsg4: bpfLinkSockAddrSendmsg4.Destroy(),
+		EventCgroupSockAddrRecvmsg4: bpfLinkSockAddrRecvmsg4.Destroy(),
+		EventCgroupSkbIngress:       bpfLinkSkbIngress.Destroy(),
+		EventCgroupSkbEgress:        bpfLinkSkbEgress.Destroy(),
 	}
 
 	for event, err := range errors {
@@ -429,6 +582,40 @@ func parseEvent(raw []byte) goData {
 		Comm:           string(bytes.TrimRight(dt.Comm[:], "\x00")),
 		EventType:      NewEventType(dt.EventType),
 		EventTimestamp: uint(dt.EventTimestamp),
+	}
+
+	return goData
+}
+
+func parseNetEvent(raw []byte) goNetData {
+	var err error
+	var dt data
+
+	buffer := bytes.NewBuffer(raw)
+	err = binary.Read(buffer, binary.LittleEndian, &dt)
+	if err != nil {
+		Warning(err)
+		return goNetData{}
+	}
+
+	goData := goNetData{
+		StartTime:      uint(dt.StartTime),
+		Pid:            uint(dt.Pid),
+		Tgid:           uint(dt.Tgid),
+		Ppid:           uint(dt.Ppid),
+		Uid:            uint(dt.Uid),
+		Gid:            uint(dt.Gid),
+		Comm:           string(bytes.TrimRight(dt.Comm[:], "\x00")),
+		EventType:      NewEventType(dt.EventType),
+		EventTimestamp: uint(dt.EventTimestamp),
+		Family:         uint(dt.Family),
+		Type:           uint(dt.Type),
+		Protocol:       uint(dt.Protocol),
+		IPv4Src:        uint(dt.IPv4Src),
+		IPv4Dst:        uint(dt.IPv4Dst),
+		PortSrc:        uint(dt.PortSrc),
+		PortDst:        uint(dt.PortDst),
+		SocketCookie:   uint(dt.SocketCookie),
 	}
 
 	return goData
@@ -467,8 +654,34 @@ func printEvent(goData goData) {
 	)
 }
 
+func inet_ntoa(val uint) string {
+	a := byte(val >> 24)
+	b := byte(val >> 16)
+	c := byte(val >> 8)
+	d := byte(val)
+	return fmt.Sprintf("%d.%d.%d.%d", a, b, c, d)
+}
+
+func printNetEvent(goNetData goNetData) {
+	fmt.Printf(
+		"    Network Packet:\n"+
+			"      cookie: %d\n"+
+			"      family: %d type: %d proto: %d\n"+
+			"      src addr: %s dst addr: %s\n"+
+			"      src port: %d dst port: %d)\n",
+		goNetData.SocketCookie,
+		goNetData.Family,
+		goNetData.Type,
+		goNetData.Protocol,
+		inet_ntoa(goNetData.IPv4Src),
+		inet_ntoa(goNetData.IPv4Dst),
+		goNetData.PortSrc,
+		goNetData.PortDst,
+	)
+}
+
 func printOpenAtValue(goOpenAtValue goOpenAtValue) {
-	fmt.Printf("Openat (filename: %s, flags: %d), retcode: %d\n",
+	fmt.Printf("    Openat (filename: %s, flags: %d), retcode: %d\n",
 		goOpenAtValue.Filename,
 		goOpenAtValue.Flags,
 		goOpenAtValue.Retcode,

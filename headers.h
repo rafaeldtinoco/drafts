@@ -36,4 +36,43 @@
 #define EDOM        33  /* Math argument out of domain of func */
 #define ERANGE      34  /* Math result not representable */
 
+// Ethernet Protocol IDs
+#define ETH_P_LOOP	0x0060
+#define ETH_P_IP	0x0800
+
+// Protocol families
+#define PF_UNSPEC	0
+#define PF_LOCAL	1
+#define PF_UNIX		PF_LOCAL
+#define PF_FILE		PF_LOCAL
+#define PF_INET		2
+#define PF_BRIDGE	7
+#define PF_INET6	10
+#define PF_KEY		15
+#define PF_NETLINK	16
+#define PF_ROUTE	PF_NETLINK
+#define PF_PACKET	17
+#define PF_IB		27
+#define PF_MPLS		28
+#define PF_BLUETOOTH	31
+#define PF_VSOCK	40
+#define PF_XDP		44
+
+/* Address families.  */
+#define AF_UNSPEC	PF_UNSPEC
+#define AF_LOCAL	PF_LOCAL
+#define AF_UNIX		PF_UNIX
+#define AF_FILE		PF_FILE
+#define AF_INET		PF_INET
+#define AF_INET6	PF_INET6
+#define AF_KEY		PF_KEY
+#define AF_NETLINK	PF_NETLINK
+#define AF_ROUTE	PF_ROUTE
+#define AF_PACKET	PF_PACKET
+#define AF_IB		PF_IB
+#define AF_MPLS		PF_MPLS
+#define AF_BLUETOOTH	PF_BLUETOOTH
+#define AF_VSOCK	PF_VSOCK
+#define AF_XDP		PF_XDP
+
 #endif

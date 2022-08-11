@@ -13,26 +13,29 @@ All you have to do is to change:
 
 ## eBPF Programs
 
-For now I have included only 2 eBPF program types:
+There is an example for the following eBPF program types:
 
-- Kprobe
-- Tracepoint
+- BPF_PROG_TYPE_KPROBE
+- BPF_PROG_TYPE_TRACEPOINT
+- BPF_PROG_TYPE_CGROUP_SKB
+- BPF_PROG_TYPE_CGROUP_SOCK
+- BPF_PROG_TYPE_CGROUP_SOCK_ADDR
 
-Both attached to "sync()" function in kernel. Whenever their programs run, when
-their hooks are triggered, they send an event to userland through perfbuffer.
+You will find each eBPF program type was introduced to satisfy a "story"
+described in the file `drafts.bpf.c`.
 
 ## eBPF Maps
 
-I have also added an eBPF map example. When the Kprobe event is received, I use
-it as a trigger to read the entry that was added by the eBPF program in an eBPF
-hash map. This shows a different way of sharing data: instead of using
-perfbuffer or ringbuffer, to simply read data from the eBPF maps directly from
-userland.
+There is an example for the following eBPF map types:
 
-## Future
+- BPF_MAP_TYPE_HASH
+- BPF_MAP_TYPE_PERF_EVENT_ARRAY
+- BPF_MAP_TYPE_PERCPU_HASH
 
-1. I'll add 1 example to each existing eBPF program type.
-1. I'll also add capability to select from perfbuffer or ringbuffer.
+## TODOs
+
+1. To add at least 1 example for each existing eBPF program type.
+1. To add at least 1 example for each existing eBPF map type.
 
 ## Compile and Run
 

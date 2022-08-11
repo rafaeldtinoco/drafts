@@ -1,21 +1,21 @@
 //go:build exclude
 
-#include "vmlinux.h"
 #include <vmlinux.h>
 #include <headers.h>
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_endian.h>
 
 char LICENSE[] SEC("license") = "GPL";
 
-#define FILENAME_MAX 64
-#define STR_PARSER_LEN 32
-#define TASK_COMM_LEN 16
+#define FILENAME_MAX                 64
+#define STR_PARSER_LEN               32
+#define TASK_COMM_LEN                16
 #define PERF_EVENT_ARRAY_MAX_ENTRIES 1024
-#define HASHMAP_MAX_ENTRIES 1024
-#define PERCPU_HASHMAP_MAX_ENTRIES 1024
+#define HASHMAP_MAX_ENTRIES          1024
+#define PERCPU_HASHMAP_MAX_ENTRIES   1024
 
 //
 // EXAMPLES: eBPF programs
@@ -28,7 +28,7 @@ char LICENSE[] SEC("license") = "GPL";
 // BPF_PROG_TYPE_TRACEPOINT                     done
 // BPF_PROG_TYPE_XDP
 // BPF_PROG_TYPE_PERF_EVENT
-// BPF_PROG_TYPE_CGROUP_SKB
+// BPF_PROG_TYPE_CGROUP_SKB                     done
 // BPF_PROG_TYPE_CGROUP_SOCK                    done
 // BPF_PROG_TYPE_LWT_IN
 // BPF_PROG_TYPE_LWT_OUT
@@ -38,7 +38,7 @@ char LICENSE[] SEC("license") = "GPL";
 // BPF_PROG_TYPE_CGROUP_DEVICE
 // BPF_PROG_TYPE_SK_MSG
 // BPF_PROG_TYPE_RAW_TRACEPOINT
-// BPF_PROG_TYPE_CGROUP_SOCK_ADDR
+// BPF_PROG_TYPE_CGROUP_SOCK_ADDR               done
 // BPF_PROG_TYPE_LWT_SEG6LOCAL
 // BPF_PROG_TYPE_LIRC_MODE2
 // BPF_PROG_TYPE_SK_REUSEPORT
@@ -85,25 +85,25 @@ char LICENSE[] SEC("license") = "GPL";
 // BPF_MAP_TYPE_STRUCT_OPS
 // BPF_MAP_TYPE_RINGBUF
 // BPF_MAP_TYPE_INODE_STORAGE
-// BPF_MAP_TYPE_TASK_STORAGE 
-// BPF_MAP_TYPE_BLOOM_FILTER 
-                             
-//                           
+// BPF_MAP_TYPE_TASK_STORAGE
+// BPF_MAP_TYPE_BLOOM_FILTER
+
+//
 // EXAMPLES: eBPF attachment types
-//                           
-                             
-// BPF_CGROUP_INET_INGRESS                      done
+//
+
+// BPF_CGROUP_INET_INGRESS                      done 
 // BPF_CGROUP_INET_EGRESS                       done
-// BPF_CGROUP_INET_SOCK_CREATE
-// BPF_CGROUP_SOCK_OPS       
-// BPF_SK_SKB_STREAM_PARSER  
-// BPF_SK_SKB_STREAM_VERDICT 
-// BPF_CGROUP_DEVICE         
-// BPF_SK_MSG_VERDICT        
-// BPF_CGROUP_INET4_BIND     
-// BPF_CGROUP_INET6_BIND     
-// BPF_CGROUP_INET4_CONNECT  
-// BPF_CGROUP_INET6_CONNECT  
+// BPF_CGROUP_INET_SOCK_CREATE                  done
+// BPF_CGROUP_SOCK_OPS
+// BPF_SK_SKB_STREAM_PARSER
+// BPF_SK_SKB_STREAM_VERDICT
+// BPF_CGROUP_DEVICE
+// BPF_SK_MSG_VERDICT
+// BPF_CGROUP_INET4_BIND                        done
+// BPF_CGROUP_INET6_BIND
+// BPF_CGROUP_INET4_CONNECT
+// BPF_CGROUP_INET6_CONNECT
 // BPF_CGROUP_INET4_POST_BIND
 // BPF_CGROUP_INET6_POST_BIND
 // BPF_CGROUP_UDP4_SENDMSG
@@ -133,7 +133,7 @@ char LICENSE[] SEC("license") = "GPL";
 // BPF_SK_SKB_VERDICT
 // BPF_SK_REUSEPORT_SELECT
 // BPF_SK_REUSEPORT_SELECT_OR_MIGRATE
-// BPF_PERF_EVENT
+// BPF_PERF_EVENT                               done
 // BPF_TRACE_KPROBE_MULTI
 
 //
@@ -158,52 +158,72 @@ struct {
 //
 
 // get current task "task_struct" structure
-static __always_inline struct task_struct *
-get_task_struct()
+static __always_inline struct task_struct *get_task_struct()
 {
     struct task_struct *task = (struct task_struct *) bpf_get_current_task();
     return task;
 }
 
 // get current task user id
-static __always_inline u32
-get_uid()
+static __always_inline u32 get_uid()
 {
     u64 id = bpf_get_current_uid_gid();
     u32 uid = id;
     return uid;
 }
+static __always_inline u32 get_uid_alternative(struct task_struct *task)
+{
+    // bpf_get_current_uid_gid() provides namespace resolved uid
+    // this approach gets uid from root namespace only
+    // (TODO: from_kgid()/from_kuid() logic here)
+    kuid_t uid = BPF_CORE_READ(task, cred, uid);
+    return uid.val;
+}
 
 // get current task group id
-static __always_inline u32
-get_gid()
+static __always_inline u32 get_gid()
 {
     u64 id = bpf_get_current_uid_gid();
     u32 gid = id >> 32;
     return gid;
 }
+static __always_inline u32 get_gid_alternative(struct task_struct *task)
+{
+    // bpf_get_current_uid_gid() provides namespace resolved uid
+    // this approach gets uid from root namespace only
+    // (TODO: from_kgid()/from_kuid() logic here)
+    kgid_t gid = BPF_CORE_READ(task, cred, gid);
+    return gid.val;
+}
 
 // get current task process id
-static __always_inline u32
-get_pid()
+static __always_inline u32 get_pid()
 {
     u64 id = bpf_get_current_pid_tgid();
     u32 pid = id;
     return pid;
 }
+static __always_inline u32 get_pid_alternative(struct task_struct *task)
+{
+    pid_t pid = BPF_CORE_READ(task, pid);
+    return pid;
+}
 
 // get current thread group id
-static __always_inline u32
-get_tgid()
+static __always_inline u32 get_tgid()
 {
     u64 id = bpf_get_current_pid_tgid();
     u32 tgid = id >> 32;
     return tgid;
 }
+static __always_inline u32 get_tgid_alternative(struct task_struct *task)
+{
+    pid_t tgid = BPF_CORE_READ(task, tgid);
+    return tgid;
+}
 
 // get current task parent process id
-static __always_inline u32
-get_ppid(struct task_struct *child)
+static __always_inline u32 get_ppid(struct task_struct *child)
 {
     struct task_struct *parent;
     parent = BPF_CORE_READ(child, real_parent);
@@ -218,13 +238,12 @@ get_ppid(struct task_struct *child)
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, HASHMAP_MAX_ENTRIES);
-    __type(key, u32);                          // key = event_type
-    __type(value, u8);                         // value = 0|1 = enabled/disabled
+    __type(key, u32);  // key = event_type
+    __type(value, u8); // value = 0|1 = enabled/disabled
 } enabled SEC(".maps");
 
 // check if the event type is enabled or not
-static __always_inline u32
-event_enabled(u32 type)
+static __always_inline u32 event_enabled(u32 type)
 {
     u8 *value = bpf_map_lookup_elem(&enabled, &type);
     if (!value)
@@ -234,22 +253,20 @@ event_enabled(u32 type)
 }
 
 typedef struct task_info {
-    u64 start_time;             // task start time
-    u32 pid;                    // host process id
-    u32 tgid;                   // host thread group id
-    u32 ppid;                   // host parent process id
-    u32 uid;                    // user id
-    u32 gid;                    // group id
-    char comm[TASK_COMM_LEN];   // command line
-    u32 padding;                // padding
+    u64 start_time;           // task start time
+    u32 pid;                  // host process id
+    u32 tgid;                 // host thread group id
+    u32 ppid;                 // host parent process id
+    u32 uid;                  // user id
+    u32 gid;                  // group id
+    char comm[TASK_COMM_LEN]; // command line
+    u32 padding;              // padding
 } task_info_t;
 
 // return an internal structured called task_info with current task information
-static __always_inline void
-get_task_info(struct task_info *info)
+static __always_inline void get_task_info(struct task_info *info)
 {
     struct task_struct *task = get_task_struct();
-    u64 id = bpf_get_current_pid_tgid();
 
     info->tgid = get_tgid();
     info->pid = get_pid();
@@ -260,22 +277,55 @@ get_task_info(struct task_info *info)
     bpf_probe_read_kernel_str(info->comm, TASK_COMM_LEN, task->comm);
 }
 
-enum event_type
+// return an internal structured called task_info with current task information
+// (this alternative version doesn't rely in bpf helpers as they might not be
+// available, depending on the caller bpf program type).
+static __always_inline void get_task_info_alternative(struct task_info *info)
 {
+    struct task_struct *task = get_task_struct();
+
+    info->tgid = get_tgid_alternative(task);
+    info->pid = get_pid_alternative(task);
+    info->uid = get_uid_alternative(task);
+    info->gid = get_gid_alternative(task);
+    info->ppid = get_ppid(task);
+
+    bpf_probe_read_kernel_str(info->comm, TASK_COMM_LEN, task->comm);
+}
+
+enum event_type {
     EVENT_KPROBE_SYNC = 1,
     EVENT_KPROBE_SYNC_MAP,
     EVENT_TP_SYNC,
     EVENT_TP_OPENAT,
-    EVENT_CGROUP_SOCKET,
-    EVENT_CGROUP_SKB_EGRESS,
+    EVENT_TP_OPENAT_EXIT,
+    EVENT_CGROUP_SOCKET_CREATE,
+    EVENT_CGROUP_SOCKET_RELEASE,
+    EVENT_CGROUP_SOCKET_POST_BIND4,
+    EVENT_CGROUP_SOCK_ADDR_BIND4,
+    EVENT_CGROUP_SOCK_ADDR_SENDMSG4,
+    EVENT_CGROUP_SOCK_ADDR_RECVMSG4,
     EVENT_CGROUP_SKB_INGRESS,
+    EVENT_CGROUP_SKB_EGRESS,
 };
+
+struct net_info {
+    u32 family;
+    u32 type;
+    u32 protocol;
+    u32 src_ipv4;
+    u32 dst_ipv4;
+	u16 src_port;
+	u16 dst_port;
+    u64 socket_cookie;
+} netinfo_t;
 
 struct event_data {
     struct task_info task;
     u32 event_type;
     u32 padding;
     u64 event_timestamp;
+    struct net_info net;
 } event_data_t;
 
 // return a structure to be sent through perfbuffer to userland
@@ -309,7 +359,7 @@ get_event_data(u32 orig, struct task_info *info, struct event_data *data)
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, HASHMAP_MAX_ENTRIES);
-    __type(key, u32); // key = tgid
+    __type(key, u32);                 // key = tgid
     __type(value, struct event_data); // value = event_data
 } sync_hashmap SEC(".maps");
 
@@ -331,13 +381,7 @@ int BPF_KPROBE(ksys_sync)
     bpf_map_update_elem(&sync_hashmap, &info.tgid, &data, BPF_ANY);
 
     // send a perf event to userland (with event_data)
-    bpf_perf_event_output(
-        ctx,
-        &perfbuffer,
-        BPF_F_CURRENT_CPU,
-        &data,
-        sizeof(data)
-    );
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
     return 0;
 }
@@ -363,13 +407,7 @@ int tracepoint__syscalls__sys_enter_sync(struct trace_event_raw_sys_enter *ctx)
     get_event_data(EVENT_TP_SYNC, &info, &data);
 
     // send a perf event to userland (with event_data)
-    bpf_perf_event_output(
-        ctx,
-        &perfbuffer,
-        BPF_F_CURRENT_CPU,
-        &data,
-        sizeof(data)
-    );
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
     return 0;
 }
@@ -389,14 +427,15 @@ int tracepoint__syscalls__sys_enter_sync(struct trace_event_raw_sys_enter *ctx)
 // save openat syscall entry context and use it on syscall exit
 
 typedef struct openat_entry {
-    long unsigned int args[6];  // args given to syscall openat
-    u32 ret;                    // openat return value at exit
+    long unsigned int args[6]; // args given to syscall openat
+    u32 ret;                   // openat return value at exit
+    u32 padding;
 } openat_entry_t;
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH); // enter & exit syscall in same cpu
     __uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
-    __type(key, u32); // key = tgid
+    __type(key, u32);                   // key = tgid
     __type(value, struct openat_entry); // value = openat_entry
 } openat_entrymap SEC(".maps");
 
@@ -419,7 +458,7 @@ int tracepoint__syscalls__sys_enter_openat(struct trace_event_raw_sys_enter *ctx
     // save syscall entry args, indexed by current process pid, to use on exit
     bpf_map_update_elem(&openat_entrymap, &info.tgid, &entry, BPF_ANY);
 
-	return 0;
+    return 0;
 }
 
 // share event data with userland through a map, use perfbuffer as event trigger
@@ -466,13 +505,10 @@ int tracepoint__syscalls__sys_exit_openat(struct trace_event_raw_sys_exit *ctx)
     // pick arguments saved from syscall entry
 
     void *pathname = (void *) entry->args[1]; // saved at syscall entry
-    int *flags = (void *) entry->args[2]; // saved at syscall entry
+    int *flags = (void *) entry->args[2];     // saved at syscall entry
 
     // map key {timestamp, tgid}
-    struct openat_key key = {
-        .event_timestamp = data.event_timestamp,
-        .tgid = data.task.tgid
-    };
+    struct openat_key key = {.event_timestamp = data.event_timestamp, .tgid = data.task.tgid};
 
     // map value {flags, retcode, filename}
     struct openat_value value = {};
@@ -486,105 +522,469 @@ int tracepoint__syscalls__sys_exit_openat(struct trace_event_raw_sys_exit *ctx)
         value.filename[2] == 't' &&
         value.filename[3] == 'c' &&
         value.filename[4] == '/') {
-
         // eBPF MAP: create an entry for userland to read
         bpf_map_update_elem(&openat_hashmap, &key, &value, BPF_ANY);
 
         // send a perf event as a trigger to userland
-        bpf_perf_event_output(
-            ctx,
-            &perfbuffer,
-            BPF_F_CURRENT_CPU,
-            &data,
-            sizeof(data)
-        );
+        bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
     }
 
     // cleanup stored data from syscall entry
     bpf_map_delete_elem(&openat_entrymap, &info.tgid);
 
-	return 0;
+    return 0;
 }
+
+//
+// WORK IN PROGRESS
+//
 
 // BPF_PROG_TYPE_CGROUP_SOCK
 //
 // cgroupv2 directory (/sys/fs/cgroup/unified for root cgroup directory)
 
 struct {
-	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, int);
-} sk_map SEC(".maps");
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, HASHMAP_MAX_ENTRIES);
+    __type(key, u64);                // socket cookie
+    __type(value, struct task_info); // task_info containing socket
+} cookie_hashmap SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, HASHMAP_MAX_ENTRIES);
+    __type(key, struct bpf_sock_tuple); // socket tuple
+    __type(value, u64);                 // associated socket cookie
+} tuple_hashmap SEC(".maps");
+
+static __always_inline bool sock_is_supported_type(struct bpf_sock *ctx)
+{
+    switch (ctx->type) {
+        case SOCK_STREAM:
+        case SOCK_DGRAM:
+            break;
+        default:
+            return false;
+    }
+    switch (ctx->family) {
+        case AF_INET:
+            break;
+        default:
+            return false;
+    }
+    switch (ctx->protocol) {
+        case IPPROTO_TCP:
+        case IPPROTO_UDP:
+            break;
+        default:
+            return false;
+    }
+    return true;
+}
 
 SEC("cgroup/sock_create")
-int cgroup__socket_create(struct bpf_sock *sk)
+int cgroup__sock_create(struct bpf_sock *ctx)
 {
-    if (!event_enabled(EVENT_CGROUP_SOCKET))
-        return 0;
+    if (!event_enabled(EVENT_CGROUP_SOCKET_CREATE))
+       return 1;
 
-    char fmt[] = "cgroup/sock_create: family %d type %d protocol %d";
-    char fmt2[] = "cgroup/sock_create: uid %u gid %u";
+    if (!sock_is_supported_type(ctx))
+        return 1;
 
     struct task_info info = {};
     struct event_data data = {};
 
-    get_task_info(&info);
-    get_event_data(EVENT_CGROUP_SOCKET, &info, &data);
+    get_task_info_alternative(&info); // missing bpf helpers <= 5.4 kernels
+    get_event_data(EVENT_CGROUP_SOCKET_CREATE, &info, &data);
 
-	int *sk_storage;
-	__u32 key;
+    if (info.comm[0] != 'n' || info.comm[1] != 'c' || info.comm[2] != '\0') {
+        return 1;
+    }
 
-	sk_storage = bpf_sk_storage_get(&sk_map, sk, 0, BPF_SK_STORAGE_GET_F_CREATE);
-	if (!sk_storage)
-		return 0;
+    u64 cookie = bpf_get_socket_cookie(ctx);
+    bpf_map_update_elem(&cookie_hashmap, &cookie, &info, BPF_ANY);
 
-    bpf_trace_printk(fmt, sizeof(fmt), sk->family, sk->type, sk->protocol);
-    bpf_trace_printk(fmt2, sizeof(fmt2), info.uid, info.gid);
-
-    // block sockets returning 0:
-    //
-    // if (sk->family == PF_INET6 &&
-    //     sk->type == SOCK_RAW   &&
-    //     sk->protocol == IPPROTO_ICMPV6)
-    // 	return 0;
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
     return 1; // allow socket to continue
 }
 
-// BPF_PROG_TYPE_CGROUP_SKB (egress)
+SEC("cgroup/sock_release")
+int cgroup__sock_release(struct bpf_sock *ctx)
+{
+    if (!event_enabled(EVENT_CGROUP_SOCKET_RELEASE))
+       return 1;
+
+    if (!sock_is_supported_type(ctx))
+        return 1;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info_alternative(&info); // missing bpf helpers <= 5.4 kernels
+    get_event_data(EVENT_CGROUP_SOCKET_RELEASE, &info, &data);
+
+    u64 cookie = bpf_get_socket_cookie(ctx);
+    if (!bpf_map_lookup_elem(&cookie_hashmap, &cookie))
+        return 1;
+    bpf_map_delete_elem(&cookie_hashmap, &cookie);
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
+    return 1;
+}
+
+SEC("cgroup/post_bind4")
+int cgroup__sock_post_bind4(struct bpf_sock *ctx)
+{
+    if (!event_enabled(EVENT_CGROUP_SOCKET_POST_BIND4))
+        return 1;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info_alternative(&info); // missing bpf helpers <= 5.4 kernels
+    get_event_data(EVENT_CGROUP_SOCKET_POST_BIND4, &info, &data);
+
+    u64 cookie = bpf_get_socket_cookie(ctx);
+    if (!bpf_map_lookup_elem(&cookie_hashmap, &cookie))
+        return 1;
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
+    return 1;
+}
+
+// BPF_PROG_TYPE_CGROUP_SOCK_ADDR
 //
 // cgroupv2 directory (/sys/fs/cgroup/unified for root cgroup directory)
 
+SEC("cgroup/bind4")
+int cgroup__sock_addr_bind4(struct bpf_sock_addr *ctx)
+{
+    if (!event_enabled(EVENT_CGROUP_SOCK_ADDR_BIND4))
+        return 1;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info_alternative(&info); // missing bpf helpers <= 5.4 kernels
+    get_event_data(EVENT_CGROUP_SOCK_ADDR_BIND4, &info, &data);
+
+    u64 cookie = bpf_get_socket_cookie(ctx);
+    if (!bpf_map_lookup_elem(&cookie_hashmap, &cookie))
+        return 1;
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
+    return 1;
+}
+
+SEC("cgroup/sendmsg4")
+int cgroup__sock_addr_sendmsg4(struct bpf_sock_addr *ctx)
+{
+    if (!event_enabled(EVENT_CGROUP_SOCK_ADDR_SENDMSG4))
+        return 1;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info_alternative(&info); // missing bpf helpers <= 5.4 kernels
+    get_event_data(EVENT_CGROUP_SOCK_ADDR_BIND4, &info, &data);
+
+    u64 cookie = bpf_get_socket_cookie(ctx);
+    if (!bpf_map_lookup_elem(&cookie_hashmap, &cookie))
+        return 1;
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
+    return 1;
+}
+
+SEC("cgroup/recvmsg4")
+int cgroup__sock_addr_recvmsg4(struct bpf_sock_addr *ctx)
+{
+    if (!event_enabled(EVENT_CGROUP_SOCK_ADDR_RECVMSG4))
+        return 1;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info_alternative(&info); // missing bpf helpers <= 5.4 kernels
+    get_event_data(EVENT_CGROUP_SOCK_ADDR_BIND4, &info, &data);
+
+    u64 cookie = bpf_get_socket_cookie(ctx);
+    if (!bpf_map_lookup_elem(&cookie_hashmap, &cookie))
+        return 1;
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
+    return 1;
+}
+
+// BPF_PROG_TYPE_CGROUP_SKB
+//
+// cgroupv2 directory (/sys/fs/cgroup/unified for root cgroup directory)
+
+SEC("cgroup_skb/ingress")
+int cgroup__skb_ingress(struct __sk_buff *ctx)
+{
+    if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
+        return 1;
+
+    if (ctx->protocol != bpf_htons(ETH_P_IP)) // ethernet (IP) only
+        return 1;
+
+    struct task_info *orig_info, info = {0};
+    struct event_data data = {0};
+
+    // INFO: ingress context is usually a kernel thread or a running task
+    get_task_info_alternative(&info); // missing bpf helpers, needs alternative
+
+    struct bpf_sock *sk = ctx->sk;
+    if (!sk) {
+        bpf_printk("ERROR: cgroup_skb/ingress: could not get bpf_sock");
+        return 1;
+    }
+
+    u64 cookie = bpf_get_socket_cookie(ctx);
+
+    bool info_exists = 1;
+    orig_info = bpf_map_lookup_elem(&cookie_hashmap, &cookie);
+    if (!orig_info) {
+        orig_info = &info;
+        info_exists = 0;
+    }
+
+    sk = bpf_sk_fullsock(sk);
+    if (!sk) {
+        bpf_printk("ERROR: cgroup_skb/ingress: could not get full bpf_sock");
+        return 1;
+    }
+
+    struct iphdr ip;
+    if (bpf_skb_load_bytes_relative(ctx, 0, &ip, sizeof(ip), BPF_HDR_START_NET))
+        return 1;
+
+    struct tcphdr tcp = {0};
+    struct udphdr udp = {0};
+
+    struct bpf_sock_tuple tuple = {};
+    tuple.ipv4.daddr = ip.daddr;
+    tuple.ipv4.saddr = ip.saddr;
+
+    switch (ip.protocol) {
+        case IPPROTO_TCP:
+            if (bpf_skb_load_bytes_relative(ctx,
+                                            sizeof(ip),
+                                            &tcp,
+                                            sizeof(struct tcphdr),
+                                            BPF_HDR_START_NET))
+                return 1;
+            tuple.ipv4.sport = tcp.source;
+            tuple.ipv4.dport = tcp.dest;
+            break;
+        case IPPROTO_UDP:
+            if (bpf_skb_load_bytes_relative(ctx,
+                                            sizeof(ip),
+                                            &udp,
+                                            sizeof(struct udphdr),
+                                            BPF_HDR_START_NET))
+                return 1;
+            tuple.ipv4.sport = udp.source;
+            tuple.ipv4.dport = udp.dest;
+            break;
+        default:
+            return 1;
+    }
+
+    bool orig_info_found = 0;
+    if (ip.protocol == IPPROTO_TCP) {
+        //
+        // If a socket cookie exists but the ctx->remote_port is 0, it means
+        // that packet is an incoming connection to an already known bound
+        // socket. In this case, we save the tuple for a near future: when a
+        // packet arrives with the same tuple and from an unknown socket (the
+        // one created by accept()).
+        // 
+        // By having the tuple saved we can add this new socket cookie into the
+        // list of known cookies for the task we're tracing  (netcat) and remove
+        // the tuple from the existing tuples map. This new socket cookie will
+        // be released by sock_release() program.
+        //
+        if (!info_exists) {
+            u64 *orig_cookie = bpf_map_lookup_elem(&tuple_hashmap, &tuple);
+            if (orig_cookie) {
+                orig_info = bpf_map_lookup_elem(&cookie_hashmap, orig_cookie);
+                if (orig_info) {
+                    orig_info_found = 1;
+                    bpf_printk("> cgroup_skb/ingress: mapping cookie: %u", cookie);
+                }
+            }
+
+            if (!orig_info_found)
+                return 1; // can't tie current socket with known task
+
+            // link the unknown socket with the task being traced
+            bpf_map_update_elem(&cookie_hashmap, &cookie, orig_info, BPF_ANY);
+            bpf_map_delete_elem(&tuple_hashmap, &tuple); // clean tuple map
+        }
+
+        if (info_exists && bpf_ntohl(ctx->remote_port) == 0) {
+            // socket just received a connection, save tupple to further
+            // identify socket (next ingress calls) created by accept()
+            bpf_map_update_elem(&tuple_hashmap, &tuple, &cookie, BPF_ANY);
+        }
+    }
+    
+    if (ip.protocol == IPPROTO_UDP) {
+        if (!orig_info_found)
+            return 1;
+    }
+
+    // get event data with correct "info" (owner of socket)
+    get_event_data(EVENT_CGROUP_SKB_INGRESS, orig_info, &data);
+
+    // construct net_info in event data
+    data.net.socket_cookie = cookie;
+    data.net.family = sk->family;
+    data.net.type = sk->type;
+    data.net.protocol = sk->protocol;
+    data.net.src_ipv4 = bpf_ntohl(tuple.ipv4.saddr);
+    data.net.dst_ipv4 = bpf_ntohl(tuple.ipv4.daddr);
+    data.net.src_port = bpf_ntohs(tuple.ipv4.sport);
+    data.net.dst_port = bpf_ntohs(tuple.ipv4.dport);
+
+    // emit a sock_create event due to new socket (from accept())
+    if (orig_info_found) {
+        struct event_data create = {0};
+        __builtin_memcpy(&create, &data, sizeof(data));
+        create.event_type = EVENT_CGROUP_SOCKET_CREATE;
+        bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &create, sizeof(create));
+    }
+
+    u64 flags = BPF_F_CURRENT_CPU;
+    flags |= (u64) ctx->len << 32;
+
+    // emit the ingress event
+    bpf_perf_event_output(ctx, &perfbuffer, flags, &data, sizeof(data));
+
+    return 1;
+}
+
 SEC("cgroup_skb/egress")
-int cgroup__skb_egress(struct __sk_buff *skb)
+int cgroup__skb_egress(struct __sk_buff *ctx)
 {
     if (!event_enabled(EVENT_CGROUP_SKB_EGRESS))
         return 1;
 
-    // get_task_info() and get_event_data() would not work because bpf helpers
-    // used by them aren't allowed for this type of bpf program, check:
-    // https://github.com/iovisor/bcc/blob/master/docs/kernel-versions.md
+    if (ctx->protocol != bpf_htons(ETH_P_IP)) // ethernet (IP) only
+        return 1;
 
-    char fmt[] = "cgroup_skb/egress: socket: family %d type %d protocol %d";
+    struct task_info *orig_info, info = {0};
+    struct event_data data = {0};
 
-    struct bpf_sock *sk = (struct bpf_sock *) skb->sk;
+    get_task_info_alternative(&info); // missing bpf helpers, needs alternative
+
+    struct bpf_sock *sk = ctx->sk;
     if (!sk) {
-        bpf_printk("ERROR: cgroup_skb/egress: could not get bpf_sock pointer");
+        bpf_printk("ERROR: cgroup_skb/egress: could not get bpf_sock");
         return 1;
     }
 
-    u64 cookie = bpf_get_socket_cookie(skb);
-    bpf_printk("cgroup_skb/egress: cookie: %ul", cookie);
+    u64 cookie = bpf_get_socket_cookie(ctx);
 
-    //struct iphdr iph;
+    bool info_exists = 1;
+    orig_info = bpf_map_lookup_elem(&cookie_hashmap, &cookie);
+    if (!orig_info) {
+        orig_info = &info;
+        info_exists = 0;
+    }
 
-    // cgroup_skb/egress: no ethernet header yet
+    sk = bpf_sk_fullsock(sk);
+    if (!sk) {
+        bpf_printk("ERROR: cgroup_skb/egress: could not get full bpf_sock");
+        return 1;
+    }
 
-    //if (bpf_skb_load_bytes_relative(skb, 0, &iph, sizeof(iph), BPF_HDR_START_NET))
-    //goto allow;
+    struct iphdr ip;
+    if (bpf_skb_load_bytes_relative(ctx, 0, &ip, sizeof(ip), BPF_HDR_START_NET))
+        return 1;
 
-    return 1; // allow socket to continue
+    struct tcphdr tcp = {0};
+    struct udphdr udp = {0};
+
+    struct bpf_sock_tuple tuple = {};
+    tuple.ipv4.daddr = ip.daddr;
+    tuple.ipv4.saddr = ip.saddr;
+
+    switch (ip.protocol) {
+        case IPPROTO_TCP:
+            if (bpf_skb_load_bytes_relative(ctx,
+                                            sizeof(ip),
+                                            &tcp,
+                                            sizeof(struct tcphdr),
+                                            BPF_HDR_START_NET))
+                return 1;
+            tuple.ipv4.sport = tcp.source;
+            tuple.ipv4.dport = tcp.dest;
+            break;
+        case IPPROTO_UDP:
+            if (bpf_skb_load_bytes_relative(ctx,
+                                            sizeof(ip),
+                                            &udp,
+                                            sizeof(struct udphdr),
+                                            BPF_HDR_START_NET))
+                return 1;
+            tuple.ipv4.sport = udp.source;
+            tuple.ipv4.dport = udp.dest;
+            break;
+        default:
+            return 1;
+    }
+
+    bool socket_created = 0;
+
+    // only trace netcat processes
+    if (!info_exists) {
+        if (info.comm[0] != 'n' ||
+            info.comm[1] != 'c' ||
+            info.comm[2] != '\0')
+            return 1;
+
+        // link unknown (task already runnning) socket with task being traced
+        bpf_map_update_elem(&cookie_hashmap, &cookie, &info, BPF_ANY);
+        socket_created = 1;
+    }
+
+    // get event data with correct "info" (owner of socket)
+    get_event_data(EVENT_CGROUP_SKB_EGRESS, orig_info, &data);
+
+    // construct net_info in event data
+    data.net.socket_cookie = cookie;
+    data.net.family = sk->family;
+    data.net.type = sk->type;
+    data.net.protocol = sk->protocol;
+    data.net.src_ipv4 = bpf_ntohl(tuple.ipv4.saddr);
+    data.net.dst_ipv4 = bpf_ntohl(tuple.ipv4.daddr);
+    data.net.src_port = bpf_ntohs(tuple.ipv4.sport);
+    data.net.dst_port = bpf_ntohs(tuple.ipv4.dport);
+
+    u64 flags = BPF_F_CURRENT_CPU;
+    flags |= (u64) ctx->len << 32;
+
+    // emit a sock_create event when new socket detected (task already running)
+    if (socket_created) {
+        struct event_data create = {0};
+        __builtin_memcpy(&create, &data, sizeof(data));
+        create.event_type = EVENT_CGROUP_SOCKET_CREATE;
+        bpf_perf_event_output(ctx, &perfbuffer, flags, &create, sizeof(create));
+    }
+
+    // emit the egress event
+    bpf_perf_event_output(ctx, &perfbuffer, flags, &data, sizeof(data));
+
+    return 1;
 }
 
 // END OF EXAMPLES
