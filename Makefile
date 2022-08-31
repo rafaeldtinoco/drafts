@@ -205,6 +205,7 @@ $(OUTPUT_DIR)/drafts.bpf.core.o: \
 		-O2 -g \
 		-I. \
 		-I$(OUTPUT_DIR) \
+		-D __TARGET_ARCH_x86 \
 		-target bpf \
 		-march=bpf -mcpu=$(BPF_VCPU) \
 		-c $(CORE_SRC) \
