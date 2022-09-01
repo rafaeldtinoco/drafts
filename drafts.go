@@ -46,7 +46,9 @@ func (e Event) String() string {
 
 const (
 	// KPROBES
-	EventKprobeUDPSendmsg EventType = iota + 1
+	EventKprobeUDPRcv    EventType = iota + 1
+	EventKretprobeUDPRcv EventType = iota + 1
+	EventKprobeUDPSendmsg
 	EventKretprobeUDPSendmsg
 	EventKprobeUDPDisconnect
 	EventKretprobeUDPDisconnect
@@ -89,6 +91,8 @@ type Events map[EventType]*Event
 
 func AllEvents() Events {
 	return Events{
+		EventKprobeUDPRcv:                {probeType: Kprobe, progName: "udp_rcv", desc: "(kprobe) UDP receive packet", enabled: true},
+		EventKretprobeUDPRcv:             {probeType: Kretprobe, progName: "ret_udp_rcv", desc: "(kprobe) UDP receive packet", enabled: true},
 		EventKprobeUDPSendmsg:            {probeType: Kprobe, progName: "udp_sendmsg", desc: "(kprobe) UDP sendmsg", enabled: true},
 		EventKretprobeUDPSendmsg:         {probeType: Kretprobe, progName: "ret_udp_sendmsg", desc: "(kprobe) UDP sendmsg", enabled: true},
 		EventKprobeUDPDisconnect:         {probeType: Kprobe, progName: "udp_disconnect", desc: "(kprobe) UDP disconnect", enabled: true},

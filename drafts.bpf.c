@@ -18,8 +18,10 @@ char LICENSE[] SEC("license") = "GPL";
 #define PERCPU_HASHMAP_MAX_ENTRIES   1024
 
 enum event_type {
+    EVENT_KPROBE_UDP_RCV = 1,
+    EVENT_KRETPROBE_UDP_RCV,
     // KPROBES
-	EVENT_KPROBE_UDP_SENDMSG = 1,
+	EVENT_KPROBE_UDP_SENDMSG,
 	EVENT_KRETPROBE_UDP_SENDMSG,
     EVENT_KPROBE_UDP_DISCONNECT,
     EVENT_KRETPROBE_UDP_DISCONNECT,
@@ -193,6 +195,15 @@ static __always_inline void get_task_info(struct task_info *info)
     bpf_probe_read_kernel_str(info->comm, TASK_COMM_LEN, task->comm);
 }
 
+static __always_inline bool should_trace(struct task_info *info)
+{
+    if (info->comm[0] != 'n' || info->comm[1] != 'c' ||
+        info->comm[2] != '\0')
+        return 0;
+
+    return 1;
+}
+
 // return an internal structured called task_info with current task information
 // (this alternative version doesn't rely in bpf helpers as they might not be
 // available, depending on the caller bpf program type).
@@ -278,66 +289,275 @@ struct {
 	__type(value, int);
 } sk_storage_map SEC(".maps");
 
-typedef struct net_entry {
+typedef struct entry {
     long unsigned int args[6];
-    u32 ret;
-    u32 padding;
-} net_entry_t;
+} entry_t;
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH); // enter & exit syscall in same cpu
     __uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
     __type(key, u32);
-    __type(value, struct net_entry);
-} net_entrymap SEC(".maps");
+    __type(value, struct entry);
+} entrymap SEC(".maps");
+
+// TESTS
+
+SEC("kprobe/udp_rcv")
+int BPF_KPROBE(udp_rcv)
+{
+    if (!event_enabled(EVENT_KPROBE_UDP_RCV))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KPROBE_UDP_RCV, &info, &data);
+
+    // if (!should_trace(&info))
+    //     return 0;
+
+    entry.args[0] = PT_REGS_PARM1(ctx); // struct sk_buff *skb
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
+    return 0;
+}
+
+SEC("kretprobe/udp_rcv")
+int BPF_KRETPROBE(ret_udp_rcv)
+{
+    if (!event_enabled(EVENT_KRETPROBE_UDP_RCV))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KRETPROBE_UDP_RCV, &info, &data);
+
+    // if (!should_trace(&info))
+    //     return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    struct sk_buff *sk = (void *) entry->args[0];
+    int ret = PT_REGS_RC(ctx);
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
+    return 0;
+}
+
 
 // KPROBES
 
 SEC("kprobe/udp_sendmsg")
 int BPF_KPROBE(udp_sendmsg)
 {
+    if (!event_enabled(EVENT_KPROBE_UDP_SENDMSG))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KPROBE_UDP_SENDMSG, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    entry.args[0] = PT_REGS_PARM1(ctx); // struct sock *sk
+    entry.args[1] = PT_REGS_PARM2(ctx); // struct msghdr *msg
+    entry.args[2] = PT_REGS_PARM3(ctx); // size_t len
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
     return 0;
 }
 
 SEC("kretprobe/udp_sendmsg")
 int BPF_KRETPROBE(ret_udp_sendmsg)
 {
+    if (!event_enabled(EVENT_KRETPROBE_UDP_SENDMSG))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KRETPROBE_UDP_SENDMSG, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    struct sock *sk = (void *) entry->args[0];
+    struct msghdr *msg = (void *) entry->args[1];
+    size_t len = entry->args[2];
+    int ret = PT_REGS_RC(ctx);
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
     return 0;
 }
 
 SEC("kprobe/__udp_disconnect")
 int BPF_KPROBE(udp_disconnect)
 {
+    if (!event_enabled(EVENT_KPROBE_UDP_DISCONNECT))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KPROBE_UDP_DISCONNECT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    entry.args[0] = PT_REGS_PARM1(ctx); // struct sock *sk
+    entry.args[1] = PT_REGS_PARM2(ctx); // int flags
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
     return 0;
 }
 
 SEC("kretprobe/__udp_disconnect")
 int BPF_KPROBE(ret_udp_disconnect)
 {
+    if (!event_enabled(EVENT_KRETPROBE_UDP_DISCONNECT))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KRETPROBE_UDP_DISCONNECT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    struct sock *sk = (void *) entry->args[0];
+    int flags = entry->args[1];
+    int ret = PT_REGS_RC(ctx);
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
     return 0;
 }
 
 SEC("kprobe/udp_destroy_sock")
 int BPF_KPROBE(udp_destroy_sock)
 {
+    if (!event_enabled(EVENT_KPROBE_UDP_DESTROY_SOCK))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info_alternative(&info);
+    get_event_data(EVENT_KPROBE_UDP_DESTROY_SOCK, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    entry.args[0] = PT_REGS_PARM1(ctx); // struct sock *sk
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
     return 0;
 }
 
 SEC("kretprobe/udp_destroy_sock")
 int BPF_KPROBE(ret_udp_destroy_sock)
 {
+    if (!event_enabled(EVENT_KRETPROBE_UDP_DESTROY_SOCK))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KRETPROBE_UDP_DESTROY_SOCK, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    struct sock *sk = (void *) entry->args[0];
+    int ret = PT_REGS_RC(ctx);
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
     return 0;
 }
 
 SEC("kprobe/tcp_connect")
 int BPF_KPROBE(tcp_connect)
 {
+    if (!event_enabled(EVENT_KPROBE_TCP_CONNECT))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KPROBE_TCP_CONNECT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    entry.args[0] = PT_REGS_PARM1(ctx); // struct sock *sk
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
     return 0;
 }
 
 SEC("kretprobe/tcp_connect")
 int BPF_KPROBE(ret_tcp_connect)
 {
+    if (!event_enabled(EVENT_KRETPROBE_TCP_CONNECT))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_KRETPROBE_TCP_CONNECT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    struct sock *sk = (void *) entry->args[0];
+    int ret = PT_REGS_RC(ctx);
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
     return 0;
 }
 
@@ -373,7 +593,6 @@ int BPF_KPROBE(security_socket_bind)
     return 0;
 }
 
-
 // TRACEPOINTS
 
 SEC("tracepoint/sock/inet_sock_set_state")
@@ -390,17 +609,19 @@ int sys_enter_socket(struct trace_event_raw_sys_enter *ctx)
 
     struct task_info info = {0};
     struct event_data data = {0};
-    struct net_entry entry = {0};
+    struct entry entry = {0};
 
     get_task_info(&info);
     get_event_data(EVENT_TP_SOCKET, &info, &data);
 
+    if (!should_trace(&info))
+        return 0;
+
     entry.args[0] = ctx->args[0]; // int domain
     entry.args[1] = ctx->args[1]; // int type
     entry.args[2] = ctx->args[2]; // int protocol
-    bpf_map_update_elem(&net_entrymap, &info.tgid, &entry, BPF_ANY);
 
-    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
 
     return 0;
 }
@@ -417,18 +638,18 @@ int sys_exit_socket(struct trace_event_raw_sys_exit *ctx)
     get_task_info(&info);
     get_event_data(EVENT_TP_SOCKET_EXIT, &info, &data);
 
-    struct net_entry *entry = bpf_map_lookup_elem(&net_entrymap, &info.tgid);
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
     if (entry == NULL)
         return 0;
 
-    // pick arguments saved from syscall entry
-    int *domain = (void *) entry->args[0];
-    int *type = (void *) entry->args[1];
-    int *proto = (void *) entry->args[2];
+    int domain = entry->args[0];
+    int type = entry->args[1];
+    int proto = entry->args[2];
+    int sockfd = ctx->ret; // success: socket fd
 
-    bpf_printk("domain: %d, type: %d, proto: %d", domain, type, proto);
-
-    // send a perf event to userland (with event_data)
     bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
     return 0;
@@ -437,51 +658,215 @@ int sys_exit_socket(struct trace_event_raw_sys_exit *ctx)
 SEC("tracepoint/syscalls/sys_enter_listen")
 int sys_enter_listen(struct trace_event_raw_sys_enter *ctx)
 {
+    if (!event_enabled(EVENT_TP_LISTEN))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info(&info);
+    get_event_data(EVENT_TP_LISTEN, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    entry.args[0] = ctx->args[0]; // int sockfd
+    entry.args[1] = ctx->args[1]; // int backlog
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_exit_listen")
 int sys_exit_listen(struct trace_event_raw_sys_exit *ctx)
 {
+    if (!event_enabled(EVENT_TP_LISTEN_EXIT))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_TP_LISTEN_EXIT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    int sockfd = entry->args[0];
+    int backlog = entry->args[1];
+    int ret = ctx->ret; // success: 0
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_enter_connect")
 int sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
 {
+    if (!event_enabled(EVENT_TP_CONNECT))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info(&info);
+    get_event_data(EVENT_TP_CONNECT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    entry.args[0] = ctx->args[0]; // int sockfd
+    entry.args[1] = ctx->args[1]; // struct sockaddr *address
+    entry.args[2] = ctx->args[2]; // socklen_t address_len
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_exit_connect")
 int sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
 {
+    if (!event_enabled(EVENT_TP_CONNECT_EXIT))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_TP_CONNECT_EXIT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    int sockfd = entry->args[0];
+    int backlog = entry->args[1];
+    int ret = ctx->ret; // success: 0
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_enter_accept")
 int sys_enter_accept(struct trace_event_raw_sys_enter *ctx)
 {
+    if (!event_enabled(EVENT_TP_ACCEPT))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info(&info);
+    get_event_data(EVENT_TP_ACCEPT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    entry.args[0] = ctx->args[0]; // int sockfd
+    entry.args[1] = ctx->args[1]; // struct sockaddr *address
+    entry.args[2] = ctx->args[2]; // u32 *address_len
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_exit_accept")
 int sys_exit_accept(struct trace_event_raw_sys_exit *ctx)
 {
+    if (!event_enabled(EVENT_TP_ACCEPT_EXIT))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_TP_ACCEPT_EXIT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    int sockfd = entry->args[0];
+    struct sockaddr *address = (void *) entry->args[1];
+    u32 *address_len = (void *) entry->args[2];
+    int newfd  = ctx->ret; // success: newfd
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_enter_bind")
 int sys_enter_bind(struct trace_event_raw_sys_enter *ctx)
 {
+    if (!event_enabled(EVENT_TP_BIND))
+        return 0;
+
+    struct task_info info = {0};
+    struct event_data data = {0};
+    struct entry entry = {0};
+
+    get_task_info(&info);
+    get_event_data(EVENT_TP_BIND, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    entry.args[0] = ctx->args[0]; // int sockfd
+    entry.args[1] = ctx->args[1]; // struct sockaddr *address
+    entry.args[2] = ctx->args[2]; // u32 address_len
+
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_exit_bind")
 int sys_exit_bind(struct trace_event_raw_sys_exit *ctx)
 {
+    if (!event_enabled(EVENT_TP_ACCEPT_EXIT))
+        return 0;
+
+    struct task_info info = {};
+    struct event_data data = {};
+
+    get_task_info(&info);
+    get_event_data(EVENT_TP_ACCEPT_EXIT, &info, &data);
+
+    if (!should_trace(&info))
+        return 0;
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (entry == NULL)
+        return 0;
+
+    int sockfd = entry->args[0];
+    struct sockaddr *address = (void *) entry->args[1];
+    u32 address_len = entry->args[2];
+    int ret = ctx->ret; // success: 0
+
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
     return 0;
 }
-
 
 // CGROUP SOCKET
 
@@ -534,16 +919,33 @@ int cgroup_sockaddr_recvmsg4(struct bpf_sock_addr *ctx)
 SEC("cgroup_skb/ingress")
 int cgroup_skb_ingress(struct __sk_buff *ctx)
 {
-    if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
-        return 1;
+    // if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
+    //     return 1;
 
-    struct bpf_sock *sk = ctx->sk;
-    if (!sk)
-        return 1;
+    // struct bpf_sock *sk = ctx->sk;
+    // if (!sk)
+    //     return 1;
 
-    sk = bpf_sk_fullsock(sk);
-    if (!sk)
-        return 1;
+    // sk = bpf_sk_fullsock(sk);
+    // if (!sk)
+    //     return 1;
+
+    // struct task_info info = {0};
+    // struct event_data data = {0};
+    // struct entry entry = {0};
+
+    // get_task_info_alternative(&info);
+    // get_event_data(EVENT_CGROUP_SKB_INGRESS, &info, &data);
+
+    // if (!should_trace(&info))
+    //     return 1;
+
+    // //struct bpf_sock_tuple tuple = {0};
+    // //bpf_sk_lookup_tcp(ctx, &tuple, sizeof(tuple), -1, 0);
+
+    // //u64 cgroup_id = bpf_get_current_cgroup_id(); CANNOT USE
+
+    // bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
     return 1;
 }
@@ -551,16 +953,28 @@ int cgroup_skb_ingress(struct __sk_buff *ctx)
 SEC("cgroup_skb/egress")
 int cgroup_skb_egress(struct __sk_buff *ctx)
 {
-    if (!event_enabled(EVENT_CGROUP_SKB_EGRESS))
-        return 1;
+    // if (!event_enabled(EVENT_CGROUP_SKB_EGRESS))
+    //     return 1;
 
-    struct bpf_sock *sk = ctx->sk;
-    if (!sk)
-        return 1;
+    // struct bpf_sock *sk = ctx->sk;
+    // if (!sk)
+    //     return 1;
 
-    sk = bpf_sk_fullsock(sk);
-    if (!sk)
-        return 1;
+    // sk = bpf_sk_fullsock(sk);
+    // if (!sk)
+    //     return 1;
+
+    // struct task_info info = {0};
+    // struct event_data data = {0};
+    // struct entry entry = {0};
+
+    // get_task_info_alternative(&info);
+    // get_event_data(EVENT_CGROUP_SKB_EGRESS, &info, &data);
+
+    // if (!should_trace(&info))
+    //     return 1;
+
+    // bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
     return 1;
 }
