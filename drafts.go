@@ -45,81 +45,26 @@ func (e Event) String() string {
 }
 
 const (
-	// KPROBES
-	EventKprobeUDPSendmsg EventType = iota + 1
-	EventKretprobeUDPSendmsg
-	EventKprobeUDPDisconnect
-	EventKretprobeUDPDisconnect
-	EventKprobeUDPDestroySock
-	EventKretprobeUDPDestroySock
-	EventKprobeTCPConnect
-	EventKretprobeTCPConnect
-	// KPROBE (SECURITY)
-	EventKprobeSecuritySocketCreate
-	EventKprobeSecuritySocketListen
-	EventKprobeSecuritySocketConnect
-	EventKprobeSecuritySocketAccept
-	EventKprobeSecuritySocketBind
-	// TRACEPOINTS
-	EventTpInetSockSetState
-	EventTpInetSockSetStateExit
-	EventTpSocket
-	EventTpSocketExit
-	EventTpListen
-	EventTpListenExit
-	EventTpConnect
-	EventTpConnectExit
-	EventTpAccept
-	EventTpAcceptExit
-	EventTpBind
-	EventTpBindExit
-	// CGROUP SOCKET
-	EventCgroupSocketCreate
-	EventCgroupSocketPostBind4
-	// CGROUP SOCKADDR
-	EventCgroupSockAddrConnect4
-	EventCgroupSockAddrSendmsg4
-	EventCgroupSockAddrRecvmsg4
-	// CGROUP SKB
+	EventCgroupSocketCreate EventType = iota + 1
 	EventCgroupSkbIngress
 	EventCgroupSkbEgress
+	EventKprobeCgroupBPFFilterSK
+	EventKretprobeCgroupBPFFilterSK
+	EventKprobeCgroupBPFFilterSKB
+	EventKretprobeCgroupBPFFilterSKB
 )
 
 type Events map[EventType]*Event
 
 func AllEvents() Events {
 	return Events{
-		EventKprobeUDPSendmsg:            {probeType: Kprobe, progName: "udp_sendmsg", desc: "(kprobe) UDP sendmsg", enabled: true},
-		EventKretprobeUDPSendmsg:         {probeType: Kretprobe, progName: "ret_udp_sendmsg", desc: "(kprobe) UDP sendmsg", enabled: true},
-		EventKprobeUDPDisconnect:         {probeType: Kprobe, progName: "udp_disconnect", desc: "(kprobe) UDP disconnect", enabled: true},
-		EventKretprobeUDPDisconnect:      {probeType: Kretprobe, progName: "ret_udp_disconnect", desc: "(kprobe) UDP disconnect", enabled: true},
-		EventKprobeUDPDestroySock:        {probeType: Kprobe, progName: "udp_destroy_sock", desc: "(kprobe) UDP destroy socket", enabled: true},
-		EventKretprobeUDPDestroySock:     {probeType: Kretprobe, progName: "ret_udp_destroy_sock", desc: "(kprobe) UDP destroy socket", enabled: true},
-		EventKprobeTCPConnect:            {probeType: Kprobe, progName: "tcp_connect", desc: "(kprobe) TCP connect", enabled: true},
-		EventKretprobeTCPConnect:         {probeType: Kretprobe, progName: "ret_tcp_connect", desc: "(kprobe) TCP connect", enabled: true},
-		EventKprobeSecuritySocketCreate:  {probeType: Kprobe, progName: "security_socket_create", desc: "(kprobe sec) socket create", enabled: true},
-		EventKprobeSecuritySocketListen:  {probeType: Kprobe, progName: "security_socket_listen", desc: "(kprobe sec) socket listen", enabled: true},
-		EventKprobeSecuritySocketConnect: {probeType: Kprobe, progName: "security_socket_connect", desc: "(kprobe sec) socket connect", enabled: true},
-		EventKprobeSecuritySocketAccept:  {probeType: Kprobe, progName: "security_socket_accept", desc: "(kprobe sec) socket accept", enabled: true},
-		EventKprobeSecuritySocketBind:    {probeType: Kprobe, progName: "security_socket_bind", desc: "(kprobe sec) socket bind", enabled: true},
-		EventTpInetSockSetState:          {probeType: Tracepoint, traceClass: "sock", progName: "inet_sock_set_state", desc: "(trace) Inet socket set state", enabled: true},
-		EventTpSocket:                    {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_enter_socket", desc: "(trace) socket enter", enabled: true},
-		EventTpSocketExit:                {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_exit_socket", desc: "(trace) socket", enabled: true},
-		EventTpListen:                    {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_enter_listen", desc: "(trace) listen enter", enabled: true},
-		EventTpListenExit:                {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_exit_listen", desc: "(trace) listen", enabled: true},
-		EventTpConnect:                   {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_enter_connect", desc: "(trace) connect enter", enabled: true},
-		EventTpConnectExit:               {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_exit_connect", desc: "(trace) connect", enabled: true},
-		EventTpAccept:                    {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_enter_accept", desc: "(trace) accept enter", enabled: true},
-		EventTpAcceptExit:                {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_exit_accept", desc: "(trace) accept", enabled: true},
-		EventTpBind:                      {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_enter_bind", desc: "(trace) bind enter", enabled: true},
-		EventTpBindExit:                  {probeType: Tracepoint, traceClass: "syscalls", progName: "sys_exit_bind", desc: "(trace) bind", enabled: true},
 		EventCgroupSocketCreate:          {probeType: CgroupLegacy, progName: "cgroup_sock_create", attachType: bpf.BPFAttachTypeCgroupInetSockCreate, desc: "(cgroup sock) socket create", enabled: true},
-		EventCgroupSocketPostBind4:       {probeType: CgroupLegacy, progName: "cgroup_sock_post_bind4", attachType: bpf.BPFAttachTypeCgroupInet4PostBind, desc: "(cgroup sock) post bind4", enabled: true},
-		EventCgroupSockAddrConnect4:      {probeType: CgroupLegacy, progName: "cgroup_sockaddr_connect4", attachType: bpf.BPFAttachTypeCgroupInet4Connect, desc: "(cgroup sockaddr) connect4", enabled: true},
-		EventCgroupSockAddrSendmsg4:      {probeType: CgroupLegacy, progName: "cgroup_sockaddr_sendmsg4", attachType: bpf.BPFAttachTypeCgroupUDP4SendMsg, desc: "(cgroup sockaddr) sendmsg4", enabled: true},
-		EventCgroupSockAddrRecvmsg4:      {probeType: CgroupLegacy, progName: "cgroup_sockaddr_recvmsg4", attachType: bpf.BPFAttachTypeCgroupUDP4RecvMsg, desc: "(cgroup sockaddr) recvmsg4", enabled: true},
 		EventCgroupSkbIngress:            {probeType: CgroupLegacy, progName: "cgroup_skb_ingress", attachType: bpf.BPFAttachTypeCgroupInetIngress, desc: "(cgroup skb) ingress", enabled: true},
 		EventCgroupSkbEgress:             {probeType: CgroupLegacy, progName: "cgroup_skb_egress", attachType: bpf.BPFAttachTypeCgroupInetEgress, desc: "(cgroup skb) egress", enabled: true},
+		EventKprobeCgroupBPFFilterSK:     {probeType: Kprobe, progName: "__cgroup_bpf_run_filter_sk", desc: "(cgroup_before) socket created", enabled: true},
+		EventKretprobeCgroupBPFFilterSK:  {probeType: Kretprobe, progName: "ret___cgroup_bpf_run_filter_sk", desc: "(cgroup_after) socket created", enabled: true},
+		EventKprobeCgroupBPFFilterSKB:    {probeType: Kprobe, progName: "__cgroup_bpf_run_filter_skb", desc: "(cgroup_before) skb", enabled: true},
+		EventKretprobeCgroupBPFFilterSKB: {probeType: Kretprobe, progName: "ret___cgroup_bpf_run_filter_skb", desc: "(cgroup_after) skb", enabled: true},
 	}
 }
 
