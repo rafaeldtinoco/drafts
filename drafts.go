@@ -45,11 +45,10 @@ func (e Event) String() string {
 }
 
 const (
-	EventCgroupSocketCreate EventType = iota + 1
-	EventCgroupSkbIngress
+	EventCgroupSkbIngress EventType = iota + 1
 	EventCgroupSkbEgress
-	EventKprobeCgroupBPFFilterSK
-	EventKretprobeCgroupBPFFilterSK
+	EventKprobeSockAllocFile
+	EventKretprobeSockAllocFile
 	EventKprobeCgroupBPFFilterSKB
 	EventKretprobeCgroupBPFFilterSKB
 )
@@ -58,11 +57,10 @@ type Events map[EventType]*Event
 
 func AllEvents() Events {
 	return Events{
-		EventCgroupSocketCreate:          {probeType: CgroupLegacy, progName: "cgroup_sock_create", attachType: bpf.BPFAttachTypeCgroupInetSockCreate, desc: "(cgroup sock) socket create", enabled: true},
 		EventCgroupSkbIngress:            {probeType: CgroupLegacy, progName: "cgroup_skb_ingress", attachType: bpf.BPFAttachTypeCgroupInetIngress, desc: "(cgroup skb) ingress", enabled: true},
 		EventCgroupSkbEgress:             {probeType: CgroupLegacy, progName: "cgroup_skb_egress", attachType: bpf.BPFAttachTypeCgroupInetEgress, desc: "(cgroup skb) egress", enabled: true},
-		EventKprobeCgroupBPFFilterSK:     {probeType: Kprobe, progName: "__cgroup_bpf_run_filter_sk", desc: "(cgroup_before) socket created", enabled: true},
-		EventKretprobeCgroupBPFFilterSK:  {probeType: Kretprobe, progName: "ret___cgroup_bpf_run_filter_sk", desc: "(cgroup_after) socket created", enabled: true},
+		EventKprobeSockAllocFile:         {probeType: Kprobe, progName: "sock_alloc_file", desc: "(kprobe) sock_alloc_file", enabled: true},
+		EventKretprobeSockAllocFile:      {probeType: Kretprobe, progName: "ret_sock_alloc_file", desc: "(kretprobe) sock_alloc_file", enabled: true},
 		EventKprobeCgroupBPFFilterSKB:    {probeType: Kprobe, progName: "__cgroup_bpf_run_filter_skb", desc: "(cgroup_before) skb", enabled: true},
 		EventKretprobeCgroupBPFFilterSKB: {probeType: Kretprobe, progName: "ret___cgroup_bpf_run_filter_skb", desc: "(cgroup_after) skb", enabled: true},
 	}

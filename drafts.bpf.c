@@ -10,17 +10,17 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
-#define TASK_COMM_LEN                16
-#define PERF_EVENT_ARRAY_MAX_ENTRIES 1024
-#define HASHMAP_MAX_ENTRIES          1024
-#define PERCPU_HASHMAP_MAX_ENTRIES   1024
+#define TASK_COMM_LEN                   16
+#define PERF_EVENT_ARRAY_MAX_ENTRIES    1024
+#define HASHMAP_MAX_ENTRIES             1024
+#define PERCPU_HASHMAP_MAX_ENTRIES      1024
+#define LRU_PERCPU_HASHAMAP_MAX_ENTRIES 102400
 
 enum event_type {
-    EVENT_CGROUP_SOCKET_CREATE = 1,
-    EVENT_CGROUP_SKB_INGRESS,
+    EVENT_CGROUP_SKB_INGRESS = 1,
     EVENT_CGROUP_SKB_EGRESS,
-    EVENT_KPROBE_CGROUP_BPF_FILTER_SK,
-    EVENT_KRETPROBE_CGROUP_BPF_FILTER_SK,
+    EVENT_KPROBE_SOCK_ALLOC_FILE,
+    EVENT_KRETPROBE_SOCK_ALLOC_FILE,
     EVENT_KPROBE_CGROUP_BPF_FILTER_SKB,
     EVENT_KRETPROBE_CGROUP_BPF_FILTER_SKB,
 };
@@ -59,9 +59,8 @@ typedef struct entry {
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH); // enter & exit syscall in same cpu
-    //__uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
-    __uint(max_entries, 1);
-    __type(key, u32);
+    __uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
+    __type(key, u32); // tgid
     __type(value, struct entry);
 } entrymap SEC(".maps");
 
@@ -97,11 +96,17 @@ struct event_data {
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-    //__uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
-    __uint(max_entries, 1);
-    __type(key, u8); // always 0 =D
-    __type(value, struct event_data);
+    __uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
+    __type(key, u8); // single entry == 0
+    __type(value, u64); // inode TODO: save the task_info directly instead of inode
 } cgrpctxmap SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, HASHMAP_MAX_ENTRIES);
+    __type(key, u64); // socket inode number
+    __type(value, struct task_info);
+} inodemap SEC(".maps");
 
 //
 // helper functions
@@ -228,21 +233,10 @@ static __always_inline bool should_trace(struct task_info *info)
 // eBPF programs
 //
 
-SEC("cgroup/sock_create")
-int cgroup_sock_create(struct bpf_sock *ctx)
+SEC("kprobe/sock_alloc_file")
+int BPF_KPROBE(sock_alloc_file)
 {
-    if (!event_enabled(EVENT_CGROUP_SOCKET_CREATE))
-       return 1;
-
-    return 1;
-}
-
-SEC("kprobe/__cgroup_bpf_run_filter_sk")
-int BPF_KPROBE(__cgroup_bpf_run_filter_sk)
-{
-    // runs before cgroup/sock_create
-
-    if (!event_enabled(EVENT_KPROBE_CGROUP_BPF_FILTER_SK))
+    if (!event_enabled(EVENT_KPROBE_SOCK_ALLOC_FILE))
         return 0;
 
     struct task_info info = {0};
@@ -250,143 +244,126 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_sk)
     struct entry entry = {0};
 
     get_task_info(&info);
-    get_event_data(EVENT_KPROBE_CGROUP_BPF_FILTER_SK, &info, &data);
+    get_event_data(EVENT_KPROBE_SOCK_ALLOC_FILE, &info, &data);
 
     if (!should_trace(&info))
         return 0;
 
-    entry.args[0] = PT_REGS_PARM1(ctx); // struct sock *sk
-    entry.args[1] = PT_REGS_PARM2(ctx); // int (enum cgroup_bpf_attach_type)
+    entry.args[0] = PT_REGS_PARM1(ctx); // struct socket *sock
+    entry.args[1] = PT_REGS_PARM2(ctx); // int flags
+    entry.args[2] = PT_REGS_PARM2(ctx); // char *dname
 
+    // prepare for kretprobe using entrymap
     bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
+
+    // submit socket creation event (entry)
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
     return 0;
 }
 
-SEC("kretprobe/__cgroup_bpf_run_filter_sk")
-int BPF_KRETPROBE(ret___cgroup_bpf_run_filter_sk)
+SEC("kretprobe/sock_alloc_file")
+int BPF_KRETPROBE(ret_sock_alloc_file)
 {
     // runs after cgroup/sock_create
 
-    if (!event_enabled(EVENT_KRETPROBE_CGROUP_BPF_FILTER_SK))
+    if (!event_enabled(EVENT_KRETPROBE_SOCK_ALLOC_FILE))
         return 0;
 
-    struct task_info info = {};
-    struct event_data data = {};
+    struct task_info info = {0};
+    struct event_data data = {0};
 
     get_task_info(&info);
-    get_event_data(EVENT_KRETPROBE_CGROUP_BPF_FILTER_SK, &info, &data);
+    get_event_data(EVENT_KRETPROBE_SOCK_ALLOC_FILE, &info, &data);
 
-    if (!should_trace(&info))
+    if (!should_trace(&info)) // faster than a lookup, try it first
         return 0;
 
     struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
-    if (entry == NULL)
+    if (!entry) // no entry == no tracing
         return 0;
 
-    struct sock *sk = (void *) entry->args[0];
-    int type = entry->args[1];
-    int ret = PT_REGS_RC(ctx);
+    struct socket *sock = (void *) entry->args[0];
+    int flags = entry->args[1];
+    char *dname = (void *) entry->args[2];
+    struct file *sock_file = (void *) PT_REGS_RC(ctx);
 
+    if (!sock_file)
+        return 0; // socket() failed ?
+
+    // TODO: fix this for 5.4 kernels (type relocations)
+
+    u16 type = BPF_CORE_READ(sock, sk, sk_type);
     switch (type) {
-        case BPF_CGROUP_INET_SOCK_CREATE:
-            bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+        case SOCK_STREAM:
+        case SOCK_DGRAM:
+            break;
+        default:
+            return 0;
+    }
+    u16 protocol = BPF_CORE_READ(sock, sk, sk_protocol);
+    switch (protocol) {
+        case IPPROTO_TCP:
+        case IPPROTO_UDP:
             break;
         default:
             return 0;
     }
 
+    u64 inode = BPF_CORE_READ(sock_file, f_inode, i_ino);
+    if (inode == 0)
+        return 0;
+
+    // submit socket creation event (return)
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
+    // update inodemap correlating inode <=> task
+    bpf_map_update_elem(&inodemap, &inode, &info, BPF_ANY);
+
     return 0;
-}
-
-SEC("cgroup_skb/ingress")
-int cgroup_skb_ingress(struct __sk_buff *ctx)
-{
-
-    //cgrpctxmap
-
-
-    // if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
-    //     return 1;
-
-    // struct bpf_sock *sk = ctx->sk;
-    // if (!sk)
-    //     return 1;
-
-    // sk = bpf_sk_fullsock(sk);
-    // if (!sk)
-    //     return 1;
-
-    // struct task_info info = {0};
-    // struct event_data data = {0};
-    // struct entry entry = {0};
-
-    // get_task_info_alternative(&info);
-    // get_event_data(EVENT_CGROUP_SKB_INGRESS, &info, &data);
-
-    // if (!should_trace(&info))
-    //     return 1;
-
-    // //struct bpf_sock_tuple tuple = {0};
-    // //bpf_sk_lookup_tcp(ctx, &tuple, sizeof(tuple), -1, 0);
-
-    // //u64 cgroup_id = bpf_get_current_cgroup_id(); CANNOT USE
-
-    // bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
-
-    return 1;
-}
-
-SEC("cgroup_skb/egress")
-int cgroup_skb_egress(struct __sk_buff *ctx)
-{
-    u8 zero = 0;
-
-    if (!event_enabled(EVENT_CGROUP_SKB_EGRESS))
-        return 1;
-
-    struct event_data *d, data = {0};
-    struct task_info *info = &data.task;
-
-    // if entry exists it means should_trace()
-    d = bpf_map_lookup_elem(&cgrpctxmap, &zero);
-    if (d == NULL)
-        return 1;
-
-    __builtin_memcpy(&data, d, sizeof(struct event_data));
-    data.event_type = EVENT_CGROUP_SKB_EGRESS;
-
-    // submit event (and skb if needed) to userland
-    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(struct event_data));
-
-    return 1;
 }
 
 SEC("kprobe/__cgroup_bpf_run_filter_skb")
 int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
 {
-    // runs before cgroup_skb/{ingress,egress}
-    u8 zero = 0;
-
     if (!event_enabled(EVENT_KPROBE_CGROUP_BPF_FILTER_SKB))
         return 0;
 
     struct task_info info = {0};
     struct event_data data = {0};
-    struct entry entry = {0};
 
     get_task_info(&info);
     get_event_data(EVENT_KPROBE_CGROUP_BPF_FILTER_SKB, &info, &data);
 
-    if (!should_trace(&info))
+    struct sock *sk = (void *) PT_REGS_PARM1(ctx);
+    struct sk_buff *skb = (void *) PT_REGS_PARM2(ctx);
+    int type = PT_REGS_PARM3(ctx);
+
+    switch (type) {
+        case BPF_CGROUP_INET_INGRESS:
+        case BPF_CGROUP_INET_EGRESS:
+            break;
+        default:
+            bpf_printk("wrong bpf attach type: %d", type);
+            return 0;
+    }
+
+    // obtain socket inode
+    u64 inode = BPF_CORE_READ(sk, sk_socket, file, f_inode, i_ino);
+    if (inode == 0)
         return 0;
 
-    entry.args[0] = PT_REGS_PARM1(ctx); // struct sock *sk
-    entry.args[1] = PT_REGS_PARM2(ctx); // struct sk_buff *skb
-    entry.args[2] = PT_REGS_PARM3(ctx); // int (enum cgroup_bpf_attach_type)
+    // pick original task from socket inode
+    struct task_info *orig_info = bpf_map_lookup_elem(&inodemap, &inode);
+    if (!orig_info)
+        return 0;
 
-    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY); // kprobe entry
-    bpf_map_update_elem(&cgrpctxmap, &zero, &data, BPF_ANY); // cgroup skb entry
+    // submit event prior to cgroup_skb/{ingress,egress}
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
+
+    // save inode before cgroup ebpf program runs
+    u8 single = 1;
+    bpf_map_update_elem(&cgrpctxmap, &single, &inode, BPF_NOEXIST);
 
     return 0;
 }
@@ -394,43 +371,69 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
 SEC("kretprobe/__cgroup_bpf_run_filter_skb")
 int BPF_KRETPROBE(ret___cgroup_bpf_run_filter_skb)
 {
-    // runs after cgroup_skb/{ingress,egress}
-    u8 zero = 0;
-
     if (!event_enabled(EVENT_KRETPROBE_CGROUP_BPF_FILTER_SKB))
         return 0;
 
-    struct task_info info = {};
-    struct event_data data = {};
-
-    get_task_info(&info);
-    get_event_data(EVENT_KRETPROBE_CGROUP_BPF_FILTER_SKB, &info, &data);
-
-    if (!should_trace(&info))
-        return 0;
-
-    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
-    if (entry == NULL) {
-        bpf_printk("could not find entrymap entry");
-        return 0;
-    }
-
-    struct sock *sk = (void *) entry->args[0];
-    struct sk_buff *skb = (void *) entry->args[1];
-    int type = entry->args[2];
-    int ret = PT_REGS_RC(ctx);
-
-    switch (type) {
-        case BPF_CGROUP_INET_INGRESS:
-        case BPF_CGROUP_INET_EGRESS:
-            bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
-            break;
-        default:
-            bpf_printk("wrong bpf attach type: %d", type);
-    }
-
-    bpf_map_delete_elem(&entrymap, &info.tgid);
-    bpf_map_delete_elem(&cgrpctxmap, &zero);
+    // delete inode after cgroup ebpf program runs
+    u8 single = 1;
+    bpf_map_delete_elem(&cgrpctxmap, &single);
 
     return 0;
 }
+
+SEC("cgroup_skb/ingress")
+int cgroup_skb_ingress(struct __sk_buff *ctx)
+{
+    if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
+       return 1;
+
+    // obtain socket inode from ebpf prog caller (cgroup_bpf_run_filter_skb)
+    u8 single = 1;
+    u64 inode, *i = bpf_map_lookup_elem(&cgrpctxmap, &single);
+    if (!i)
+        return 1;
+    bpf_core_read(&inode, sizeof(u64), i);
+
+    // pick original task from socket inode
+    struct task_info info = {0};
+    struct task_info *ti = bpf_map_lookup_elem(&inodemap, &inode);
+    if (!ti)
+        return 1;
+    bpf_core_read(&info, sizeof(struct task_info), ti);
+
+    // submit event data using original task
+    struct event_data data = {0};
+    get_event_data(EVENT_CGROUP_SKB_INGRESS, &info, &data);
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(struct event_data));
+
+    return 1;
+}
+
+SEC("cgroup_skb/egress")
+int cgroup_skb_egress(struct __sk_buff *ctx)
+{
+    if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
+       return 1;
+
+    // obtain socket inode from ebpf prog caller (cgroup_bpf_run_filter_skb)
+    u8 single = 1;
+    u64 inode, *i = bpf_map_lookup_elem(&cgrpctxmap, &single);
+    if (!i)
+        return 1;
+    bpf_core_read(&inode, sizeof(u64), i);
+
+    // pick original task from socket inode
+    struct task_info info = {0};
+    struct task_info *ti = bpf_map_lookup_elem(&inodemap, &inode);
+    if (!ti)
+        return 1;
+    bpf_core_read(&info, sizeof(struct task_info), ti);
+
+    // submit event data using original task
+    struct event_data data = {0};
+    get_event_data(EVENT_CGROUP_SKB_EGRESS, &info, &data);
+    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(struct event_data));
+
+    return 1;
+}
+
