@@ -257,7 +257,7 @@ LOOP:
 			event := all.GetEventUint32(uint32(data.EventType))
 			printEvent(event, data)
 			switch EventType(data.EventType) {
-			case EventCgroupSkbIngress:
+			case EventCgroupSkbIngress, EventCgroupSkbEgress:
 				// obtaining the packet payload right after event
 				packet := gopacket.NewPacket(
 					dataRaw[96:],
@@ -268,7 +268,8 @@ LOOP:
 					Warning(fmt.Errorf("could not parse the packet"))
 					continue
 				}
-				fmt.Printf("%s", packet.Dump())
+				//fmt.Printf("%s", packet.Dump())
+				fmt.Printf("%s", packet.String())
 			}
 		case lostEvents := <-lostChannel:
 			fmt.Fprintf(os.Stdout, "lost %d events\n", lostEvents)

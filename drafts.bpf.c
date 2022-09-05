@@ -98,7 +98,8 @@ struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
     __uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
     __type(key, u8); // single entry == 0
-    __type(value, u64); // inode TODO: save the task_info directly instead of inode
+    //__type(value, u64); // inode TODO: save the task_info directly instead of inode
+    __type(value, struct event_data); // inode TODO: save the task_info directly instead of inode
 } cgrpctxmap SEC(".maps");
 
 struct {
@@ -293,22 +294,22 @@ int BPF_KRETPROBE(ret_sock_alloc_file)
 
     // TODO: fix this for 5.4 kernels (type relocations)
 
-    u16 type = BPF_CORE_READ(sock, sk, sk_type);
-    switch (type) {
-        case SOCK_STREAM:
-        case SOCK_DGRAM:
-            break;
-        default:
-            return 0;
-    }
-    u16 protocol = BPF_CORE_READ(sock, sk, sk_protocol);
-    switch (protocol) {
-        case IPPROTO_TCP:
-        case IPPROTO_UDP:
-            break;
-        default:
-            return 0;
-    }
+    // u16 type = BPF_CORE_READ(sock, sk, sk_type);
+    // switch (type) {
+    //     case SOCK_STREAM:
+    //     case SOCK_DGRAM:
+    //         break;
+    //     default:
+    //         return 0;
+    // }
+    // u16 protocol = BPF_CORE_READ(sock, sk, sk_protocol);
+    // switch (protocol) {
+    //     case IPPROTO_TCP:
+    //     case IPPROTO_UDP:
+    //         break;
+    //     default:
+    //         return 0;
+    // }
 
     u64 inode = BPF_CORE_READ(sock_file, f_inode, i_ino);
     if (inode == 0)
@@ -344,7 +345,7 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
         case BPF_CGROUP_INET_EGRESS:
             break;
         default:
-            bpf_printk("wrong bpf attach type: %d", type);
+            // wrong bpf attachment type
             return 0;
     }
 
@@ -354,16 +355,28 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
         return 0;
 
     // pick original task from socket inode
-    struct task_info *orig_info = bpf_map_lookup_elem(&inodemap, &inode);
-    if (!orig_info)
+    struct task_info *ti = bpf_map_lookup_elem(&inodemap, &inode);
+    if (!ti)
         return 0;
 
-    // submit event prior to cgroup_skb/{ingress,egress}
+    // submit the kprobe event first (before cgroup/skb program)
     bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
-    // save inode before cgroup ebpf program runs
+    // prepare stuff for skb program
+    struct event_data orig_data = {0};
+    struct task_info orig_info = {0};
+
     u8 single = 1;
-    bpf_map_update_elem(&cgrpctxmap, &single, &inode, BPF_NOEXIST);
+    bpf_core_read(&orig_info, sizeof(struct task_info), ti);
+    switch (type) {
+        case BPF_CGROUP_INET_INGRESS:
+            get_event_data(EVENT_CGROUP_SKB_INGRESS, &orig_info, &orig_data);
+            break;
+        case BPF_CGROUP_INET_EGRESS:
+            get_event_data(EVENT_CGROUP_SKB_EGRESS, &orig_info, &orig_data);
+            break;
+    }
+    bpf_map_update_elem(&cgrpctxmap, &single, &orig_data, BPF_NOEXIST);
 
     return 0;
 }
@@ -387,30 +400,17 @@ int cgroup_skb_ingress(struct __sk_buff *ctx)
     if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
        return 1;
 
-    // obtain socket inode from ebpf prog caller (cgroup_bpf_run_filter_skb)
     u8 single = 1;
-    u64 inode, *i = bpf_map_lookup_elem(&cgrpctxmap, &single);
-    if (!i)
+    struct event_data *d = bpf_map_lookup_elem(&cgrpctxmap, &single);
+    if (!d)
         return 1;
-    bpf_core_read(&inode, sizeof(u64), i);
-
-    // // pick original task from socket inode
-    struct task_info info = {0};
-    struct task_info *ti = bpf_map_lookup_elem(&inodemap, &inode);
-    if (!ti)
-        return 1;
-    bpf_core_read(&info, sizeof(struct task_info), ti);
 
     // add skb payload to the event
     u64 flags = BPF_F_CURRENT_CPU;
     flags |= (u64) ctx->len << 32;
 
-    // event data using original task
-    struct event_data data = {0};
-    get_event_data(EVENT_CGROUP_SKB_INGRESS, &info, &data);
-
     // submit event with payload to userland (after event data)
-    bpf_perf_event_output(ctx, &perfbuffer, flags, &data, sizeof(struct event_data));
+    bpf_perf_event_output(ctx, &perfbuffer, flags, d, sizeof(struct event_data));
 
     return 1;
 }
@@ -421,28 +421,17 @@ int cgroup_skb_egress(struct __sk_buff *ctx)
     if (!event_enabled(EVENT_CGROUP_SKB_EGRESS))
        return 1;
 
-    // obtain socket inode from ebpf prog caller (cgroup_bpf_run_filter_skb)
     u8 single = 1;
-    u64 inode, *i = bpf_map_lookup_elem(&cgrpctxmap, &single);
-    if (!i)
+    struct event_data *d = bpf_map_lookup_elem(&cgrpctxmap, &single);
+    if (!d)
         return 1;
-    bpf_core_read(&inode, sizeof(u64), i);
 
-    // pick original task from socket inode
-    struct task_info info = {0};
-    struct task_info *ti = bpf_map_lookup_elem(&inodemap, &inode);
-    if (!ti)
-        return 1;
-    bpf_core_read(&info, sizeof(struct task_info), ti);
-
-    // submit skb payload to userland (after event data)
+    // add skb payload to the event
     u64 flags = BPF_F_CURRENT_CPU;
     flags |= (u64) ctx->len << 32;
 
-    // submit event data using original task
-    struct event_data data = {0};
-    get_event_data(EVENT_CGROUP_SKB_EGRESS, &info, &data);
-    bpf_perf_event_output(ctx, &perfbuffer, flags, &data, sizeof(struct event_data));
+    // submit event with payload to userland (after event data)
+    bpf_perf_event_output(ctx, &perfbuffer, flags, d, sizeof(struct event_data));
 
     return 1;
 }
