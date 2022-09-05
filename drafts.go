@@ -16,6 +16,8 @@ import (
 	"unsafe"
 
 	bpf "github.com/aquasecurity/libbpfgo"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 )
 
 type ProbeType uint32
@@ -30,6 +32,7 @@ const (
 type EventType uint32
 
 type Event struct {
+	eventType  EventType
 	desc       string
 	enabled    bool
 	progName   string
@@ -116,7 +119,7 @@ type goData struct {
 	Uid            uint
 	Gid            uint
 	Comm           string
-	Event          *Event
+	EventType      uint
 	EventTimestamp uint
 }
 
@@ -129,7 +132,7 @@ type goNetData struct {
 	Uid            uint
 	Gid            uint
 	Comm           string
-	Event          *Event
+	EventType      uint
 	EventTimestamp uint
 	Family         uint
 	Type           uint
@@ -190,6 +193,7 @@ func main() {
 
 	all := AllEvents()
 
+	// attach all events based on their probe types
 	for id, event := range all {
 		if event.enabled {
 			key := uint32(id)
@@ -220,8 +224,6 @@ func main() {
 		}
 	}
 
-	// add event and link creation
-
 	eventsChannel := make(chan []byte)
 	lostChannel := make(chan uint64)
 
@@ -251,10 +253,23 @@ LOOP:
 	for {
 		select {
 		case dataRaw := <-eventsChannel:
-			data := parseEvent(all, dataRaw)
-			printEvent(data)
-			// switch data.EventType { // check for specific eBPF event received
-			// }
+			data := parseEvent(dataRaw)
+			event := all.GetEventUint32(uint32(data.EventType))
+			printEvent(event, data)
+			switch EventType(data.EventType) {
+			case EventCgroupSkbIngress:
+				// obtaining the packet payload right after event
+				packet := gopacket.NewPacket(
+					dataRaw[96:],
+					layers.LayerTypeIPv4,
+					gopacket.Default,
+				)
+				if packet == nil {
+					Warning(fmt.Errorf("could not parse the packet"))
+					continue
+				}
+				fmt.Printf("%s", packet.Dump())
+			}
 		case lostEvents := <-lostChannel:
 			fmt.Fprintf(os.Stdout, "lost %d events\n", lostEvents)
 
@@ -276,7 +291,7 @@ LOOP:
 	os.Exit(0)
 }
 
-func parseEvent(e Events, raw []byte) goData {
+func parseEvent(raw []byte) goData {
 	var err error
 	var dt data
 
@@ -295,14 +310,14 @@ func parseEvent(e Events, raw []byte) goData {
 		Uid:            uint(dt.Uid),
 		Gid:            uint(dt.Gid),
 		Comm:           string(bytes.TrimRight(dt.Comm[:], "\x00")),
-		Event:          e.GetEventUint32(dt.EventType),
+		EventType:      uint(dt.EventType),
 		EventTimestamp: uint(dt.EventTimestamp),
 	}
 
 	return goData
 }
 
-func parseNetEvent(e Events, raw []byte) goNetData {
+func parseNetEvent(raw []byte) goNetData {
 	var err error
 	var dt data
 
@@ -321,7 +336,7 @@ func parseNetEvent(e Events, raw []byte) goNetData {
 		Uid:            uint(dt.Uid),
 		Gid:            uint(dt.Gid),
 		Comm:           string(bytes.TrimRight(dt.Comm[:], "\x00")),
-		Event:          e.GetEventUint32(dt.EventType),
+		EventType:      uint(dt.EventType),
 		EventTimestamp: uint(dt.EventTimestamp),
 		Family:         uint(dt.Family),
 		Type:           uint(dt.Type),
@@ -336,10 +351,10 @@ func parseNetEvent(e Events, raw []byte) goNetData {
 	return goData
 }
 
-func printEvent(goData goData) {
+func printEvent(e *Event, goData goData) {
 	fmt.Printf(
 		"(%s) %s (pid: %d, tgid: %d, ppid: %d, uid: %d, gid: %d)\n",
-		goData.Event,
+		e,
 		goData.Comm,
 		goData.Pid,
 		goData.Tgid,
@@ -357,7 +372,7 @@ func inet_ntoa(val uint) string {
 	return fmt.Sprintf("%d.%d.%d.%d", a, b, c, d)
 }
 
-func printNetEvent(goNetData goNetData) {
+func printNetEvent(e *Event, goNetData goNetData) {
 	fmt.Printf(
 		"    Network Packet:\n"+
 			"      cookie: %d\n"+

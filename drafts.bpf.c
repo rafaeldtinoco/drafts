@@ -394,17 +394,23 @@ int cgroup_skb_ingress(struct __sk_buff *ctx)
         return 1;
     bpf_core_read(&inode, sizeof(u64), i);
 
-    // pick original task from socket inode
+    // // pick original task from socket inode
     struct task_info info = {0};
     struct task_info *ti = bpf_map_lookup_elem(&inodemap, &inode);
     if (!ti)
         return 1;
     bpf_core_read(&info, sizeof(struct task_info), ti);
 
-    // submit event data using original task
+    // add skb payload to the event
+    u64 flags = BPF_F_CURRENT_CPU;
+    flags |= (u64) ctx->len << 32;
+
+    // event data using original task
     struct event_data data = {0};
     get_event_data(EVENT_CGROUP_SKB_INGRESS, &info, &data);
-    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(struct event_data));
+
+    // submit event with payload to userland (after event data)
+    bpf_perf_event_output(ctx, &perfbuffer, flags, &data, sizeof(struct event_data));
 
     return 1;
 }
@@ -412,7 +418,7 @@ int cgroup_skb_ingress(struct __sk_buff *ctx)
 SEC("cgroup_skb/egress")
 int cgroup_skb_egress(struct __sk_buff *ctx)
 {
-    if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
+    if (!event_enabled(EVENT_CGROUP_SKB_EGRESS))
        return 1;
 
     // obtain socket inode from ebpf prog caller (cgroup_bpf_run_filter_skb)
@@ -429,11 +435,14 @@ int cgroup_skb_egress(struct __sk_buff *ctx)
         return 1;
     bpf_core_read(&info, sizeof(struct task_info), ti);
 
+    // submit skb payload to userland (after event data)
+    u64 flags = BPF_F_CURRENT_CPU;
+    flags |= (u64) ctx->len << 32;
+
     // submit event data using original task
     struct event_data data = {0};
     get_event_data(EVENT_CGROUP_SKB_EGRESS, &info, &data);
-    bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(struct event_data));
+    bpf_perf_event_output(ctx, &perfbuffer, flags, &data, sizeof(struct event_data));
 
     return 1;
 }
-
