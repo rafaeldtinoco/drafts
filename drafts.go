@@ -269,7 +269,7 @@ LOOP:
 					continue
 				}
 				//fmt.Printf("%s", packet.Dump())
-				fmt.Printf("%s", packet.String())
+				//fmt.Printf("%s", packet.String())
 			}
 		case lostEvents := <-lostChannel:
 			fmt.Fprintf(os.Stdout, "lost %d events\n", lostEvents)

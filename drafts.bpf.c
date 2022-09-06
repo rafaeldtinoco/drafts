@@ -94,12 +94,19 @@ struct event_data {
     struct net_info net;
 } event_data_t;
 
+// struct {
+//     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+//     __uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
+//     __type(key, u8); // single entry == 0
+//     //__type(value, u64); // inode TODO: save the task_info directly instead of inode
+//     __type(value, struct event_data); // inode TODO: save the task_info directly instead of inode
+// } cgrpctxmap SEC(".maps");
+
 struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-    __uint(max_entries, PERCPU_HASHMAP_MAX_ENTRIES);
-    __type(key, u8); // single entry == 0
-    //__type(value, u64); // inode TODO: save the task_info directly instead of inode
-    __type(value, struct event_data); // inode TODO: save the task_info directly instead of inode
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, HASHMAP_MAX_ENTRIES);
+    __type(key, u64); // sk_buff timestamp
+    __type(value, struct event_data); // event data for skb ebpf prog
 } cgrpctxmap SEC(".maps");
 
 struct {
@@ -234,6 +241,33 @@ static __always_inline bool should_trace(struct task_info *info)
 // eBPF programs
 //
 
+// There are multiple ways to follow ingress/egress for a task. One way is
+// to try to track all flows within network interfaces and keep a map of
+// addresses tuples and translations. OR, sk_storage and socket cookies might
+// help in understanding which sock/sk_buff context the bpf program is dealing
+// with but, at the end, the need is always to tie a flow to a task (specially
+// when hooking ingress skb bpf programs, when the current task is a
+// kernel thread most of the times).
+
+// Unfortunately that gets even more complicated in older kernels: the cgroup
+// skb programs have almost no bpf helpers to use, and most of common code
+// causes verifier to fail. With that in mind, this approach uses a technique
+// of kprobing the function responsible for calling the cgroup/skb programs.
+
+// All the work that should be done by the cgroup/skb programs is done by this
+// kprobe/kretprobe hook logic (right before and right after the cgroup/skb
+// program runs). This way, all work that cgroup/skb program needs to do is
+// a bpf map lookup and a return.
+
+// Obviously this has some cons: this kprobe->cgroup/skb->kretprobe execution
+// flow does not have preemption disabled, so the map used in between the 3
+// hooks need to use something that is available to all 3 of them.
+
+// At the end, the logic is simple: every time a socket is created an inode
+// is also created. The task owning the socket is indexed by the socket inode
+// so everytime this socket is used we know which task it belongs to (specially
+// during ingress hook).
+
 SEC("kprobe/sock_alloc_file")
 int BPF_KPROBE(sock_alloc_file)
 {
@@ -345,9 +379,14 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
         case BPF_CGROUP_INET_EGRESS:
             break;
         default:
-            // wrong bpf attachment type
-            return 0;
+            return 0; // wrong attachment type
     }
+
+    struct entry entry = {0};
+    entry.args[1] = PT_REGS_PARM2(ctx); // struct sk_buff *skb
+
+    // prepare for kretprobe using entrymap
+    bpf_map_update_elem(&entrymap, &info.tgid, &entry, BPF_ANY);
 
     // obtain socket inode
     u64 inode = BPF_CORE_READ(sk, sk_socket, file, f_inode, i_ino);
@@ -359,6 +398,9 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
     if (!ti)
         return 0;
 
+    // use skb timestamp as the key for cgroup/skb program context
+    u64 skbts = BPF_CORE_READ(skb, tstamp);
+
     // submit the kprobe event first (before cgroup/skb program)
     bpf_perf_event_output(ctx, &perfbuffer, BPF_F_CURRENT_CPU, &data, sizeof(data));
 
@@ -366,7 +408,6 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
     struct event_data orig_data = {0};
     struct task_info orig_info = {0};
 
-    u8 single = 1;
     bpf_core_read(&orig_info, sizeof(struct task_info), ti);
     switch (type) {
         case BPF_CGROUP_INET_INGRESS:
@@ -376,7 +417,25 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
             get_event_data(EVENT_CGROUP_SKB_EGRESS, &orig_info, &orig_data);
             break;
     }
-    bpf_map_update_elem(&cgrpctxmap, &single, &orig_data, BPF_NOEXIST);
+
+    // Use skb timestamp as the key for a map shared between this kprobe and the
+    // skb ebpf program: this is **NOT SUPER** BUT, for older kernels, that
+    // don't provide absolute no eBPF helpers in cgroup/skb programs, it does
+    // its job: pre-process everything the cgroup/skb program can use.
+    //
+    // Explanation: The cgroup/skb eBPF program is called right after this
+    // kprobe but preemption is enabled. If preemption wasn't enabled, we could
+    // simply populate the map with a single item and pick it inside cgroup/skb
+    // BUT we might have a preemption in between the kprobe and the BPF program
+    // run. SO, instead, we index map items using the skb timestamp, which is
+    // a value that is shared among this kprobe AND the cgroup/skb program
+    // context (through its skbuf copy).
+    //
+    // Theoretically, map collisions might occur, BUT very unlikely due to:
+    //
+    // kprobe (map update) -> cgroup/skb (consume) -> kretprobe (map delete)
+
+    bpf_map_update_elem(&cgrpctxmap, &skbts, &orig_data, BPF_NOEXIST);
 
     return 0;
 }
@@ -387,11 +446,46 @@ int BPF_KRETPROBE(ret___cgroup_bpf_run_filter_skb)
     if (!event_enabled(EVENT_KRETPROBE_CGROUP_BPF_FILTER_SKB))
         return 0;
 
+    struct task_info info = {0};
+    get_task_info(&info);
+
+    struct entry *entry = bpf_map_lookup_elem(&entrymap, &info.tgid);
+    if (!entry) // no entry == no tracing
+        return 0;
+
+    struct sk_buff *skb = (void *) entry->args[1];
+
+    // use skb timestamp as the key for cgroup/skb program context
+    u64 skbts = BPF_CORE_READ(skb, tstamp);
+
+    // only continue if cgrpctxmap entry exists
+    struct event_data *d = bpf_map_lookup_elem(&cgrpctxmap, &skbts);
+    if (!d)
+        return 1;
+
     // delete inode after cgroup ebpf program runs
-    u8 single = 1;
-    bpf_map_delete_elem(&cgrpctxmap, &single);
+    bpf_map_delete_elem(&cgrpctxmap, &skbts);
 
     return 0;
+}
+
+static __always_inline u32 cgroup_skb_generic(struct __sk_buff *ctx)
+{
+    // use skb timestamp as the key for cgroup/skb program context
+    u64 skbts = ctx->tstamp;
+
+    struct event_data *d = bpf_map_lookup_elem(&cgrpctxmap, &skbts);
+    if (!d)
+        return 1;
+
+    // add skb payload to the event
+    u64 flags = BPF_F_CURRENT_CPU;
+    flags |= (u64) ctx->len << 32;
+
+    // submit event with payload to userland (after event data)
+    bpf_perf_event_output(ctx, &perfbuffer, flags, d, sizeof(struct event_data));
+
+    return 1;
 }
 
 SEC("cgroup_skb/ingress")
@@ -400,19 +494,7 @@ int cgroup_skb_ingress(struct __sk_buff *ctx)
     if (!event_enabled(EVENT_CGROUP_SKB_INGRESS))
        return 1;
 
-    u8 single = 1;
-    struct event_data *d = bpf_map_lookup_elem(&cgrpctxmap, &single);
-    if (!d)
-        return 1;
-
-    // add skb payload to the event
-    u64 flags = BPF_F_CURRENT_CPU;
-    flags |= (u64) ctx->len << 32;
-
-    // submit event with payload to userland (after event data)
-    bpf_perf_event_output(ctx, &perfbuffer, flags, d, sizeof(struct event_data));
-
-    return 1;
+    return cgroup_skb_generic(ctx);
 }
 
 SEC("cgroup_skb/egress")
@@ -421,17 +503,5 @@ int cgroup_skb_egress(struct __sk_buff *ctx)
     if (!event_enabled(EVENT_CGROUP_SKB_EGRESS))
        return 1;
 
-    u8 single = 1;
-    struct event_data *d = bpf_map_lookup_elem(&cgrpctxmap, &single);
-    if (!d)
-        return 1;
-
-    // add skb payload to the event
-    u64 flags = BPF_F_CURRENT_CPU;
-    flags |= (u64) ctx->len << 32;
-
-    // submit event with payload to userland (after event data)
-    bpf_perf_event_output(ctx, &perfbuffer, flags, d, sizeof(struct event_data));
-
-    return 1;
+    return cgroup_skb_generic(ctx);
 }
