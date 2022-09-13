@@ -269,6 +269,48 @@ static __always_inline bool should_trace(struct task_info *info)
 // so everytime this socket is used we know which task it belongs to (specially
 // during ingress hook).
 
+static __always_inline bool is_socket_supported(struct socket *sock)
+{
+    struct sock_common *common = (void *) BPF_CORE_READ(sock, sk);
+    struct sock *sk = (void *) BPF_CORE_READ(sock, sk);
+
+    u8 family = BPF_CORE_READ(common, skc_family);
+    switch (family) {
+        case PF_INET:
+        case PF_INET6:
+        //case PF_IB:
+            break;
+        default:
+            return 0;
+    }
+    u16 type = BPF_CORE_READ_BITFIELD_PROBED(sk, sk_type);
+    switch (type) {
+        case SOCK_STREAM:
+        case SOCK_DGRAM:
+            break;
+        default:
+            return 0;
+    }
+    u16 protocol = BPF_CORE_READ_BITFIELD_PROBED(sk, sk_protocol);
+    switch (protocol) {
+        case IPPROTO_IP:
+        case IPPROTO_TCP:
+        case IPPROTO_UDP:
+        //case IPPROTO_UDPLITE:
+        case IPPROTO_ICMP:
+        case IPPROTO_ICMPV6:
+        //case IPPROTO_IPIP:
+        //case IPPROTO_IPV6:
+        //case IPPROTO_DCCP:
+        //case IPPROTO_SCTP:
+            break;
+        default:
+            return 0;
+    }
+
+    return 1;
+}
+
 SEC("kprobe/sock_alloc_file")
 int BPF_KPROBE(sock_alloc_file)
 {
@@ -327,42 +369,8 @@ int BPF_KRETPROBE(ret_sock_alloc_file)
     if (!sock_file)
         return 0; // socket() failed ?
 
-    // TODO: fix this for 5.4 kernels (type relocations)
-    struct sock_common *common = (void *) BPF_CORE_READ(sock, sk);
-    u8 family = BPF_CORE_READ(common, skc_family);
-    switch (family) {
-        case PF_INET:
-        case PF_INET6:
-        //case PF_IB:
-            break;
-        default:
-            return 0;
-    }
-
-    u16 type = BPF_CORE_READ(sock, sk, sk_type);
-    switch (type) {
-        case SOCK_STREAM:
-        case SOCK_DGRAM:
-            break;
-        default:
-            return 0;
-    }
-    u16 protocol = BPF_CORE_READ(sock, sk, sk_protocol);
-    switch (protocol) {
-        case IPPROTO_IP:
-        case IPPROTO_TCP:
-        case IPPROTO_UDP:
-        //case IPPROTO_UDPLITE:
-        case IPPROTO_ICMP:
-        case IPPROTO_ICMPV6:
-        //case IPPROTO_IPIP:
-        //case IPPROTO_IPV6:
-        //case IPPROTO_DCCP:
-        //case IPPROTO_SCTP:
-            break;
-        default:
-            return 0;
-    }
+    if (!is_socket_supported(sock))
+        return 0;
 
     u64 inode = BPF_CORE_READ(sock_file, f_inode, i_ino);
     if (inode == 0)
