@@ -253,15 +253,25 @@ LOOP:
 	for {
 		select {
 		case dataRaw := <-eventsChannel:
-			data := parseEvent(dataRaw)
+			//data := parseEvent(dataRaw)
+			data := parseNetEvent(dataRaw)
 			event := all.GetEventUint32(uint32(data.EventType))
-			printEvent(event, data)
+			printNetEvent(event, data)
 			switch EventType(data.EventType) {
 			case EventCgroupSkbIngress, EventCgroupSkbEgress:
+				var layerType gopacket.LayerType
+				switch data.Family {
+				case 2: // PF_INET
+					layerType = layers.LayerTypeIPv4
+				case 10: // PF_INET6
+					layerType = layers.LayerTypeIPv6
+				default:
+					continue
+				}
 				// obtaining the packet payload right after event
 				packet := gopacket.NewPacket(
 					dataRaw[96:],
-					layers.LayerTypeIPv4,
+					layerType,
 					gopacket.Default,
 				)
 				if packet == nil {
@@ -269,7 +279,7 @@ LOOP:
 					continue
 				}
 				//fmt.Printf("%s", packet.Dump())
-				//fmt.Printf("%s", packet.String())
+				fmt.Printf("%s", packet.String())
 			}
 		case lostEvents := <-lostChannel:
 			fmt.Fprintf(os.Stdout, "lost %d events\n", lostEvents)
@@ -373,22 +383,34 @@ func inet_ntoa(val uint) string {
 	return fmt.Sprintf("%d.%d.%d.%d", a, b, c, d)
 }
 
-func printNetEvent(e *Event, goNetData goNetData) {
+func printNetEvent(e *Event, goData goNetData) {
+
 	fmt.Printf(
-		"    Network Packet:\n"+
-			"      cookie: %d\n"+
-			"      family: %d type: %d proto: %d\n"+
-			"      src addr: %s dst addr: %s\n"+
-			"      src port: %d dst port: %d)\n",
-		goNetData.SocketCookie,
-		goNetData.Family,
-		goNetData.Type,
-		goNetData.Protocol,
-		inet_ntoa(goNetData.IPv4Src),
-		inet_ntoa(goNetData.IPv4Dst),
-		goNetData.PortSrc,
-		goNetData.PortDst,
+		"(%s) %s (pid: %d, tgid: %d, ppid: %d, uid: %d, gid: %d)\n",
+		e,
+		goData.Comm,
+		goData.Pid,
+		goData.Tgid,
+		goData.Ppid,
+		goData.Uid,
+		goData.Gid,
 	)
+
+	// fmt.Printf(
+	// 	"    Network Packet:\n"+
+	// 		"      cookie: %d\n"+
+	// 		"      family: %d type: %d proto: %d\n"+
+	// 		"      src addr: %s dst addr: %s\n"+
+	// 		"      src port: %d dst port: %d)\n",
+	// 	goNetData.SocketCookie,
+	// 	goNetData.Family,
+	// 	goNetData.Type,
+	// 	goNetData.Protocol,
+	// 	inet_ntoa(goNetData.IPv4Src),
+	// 	inet_ntoa(goNetData.IPv4Dst),
+	// 	goNetData.PortSrc,
+	// 	goNetData.PortDst,
+	// )
 }
 
 func Warning(err error) {

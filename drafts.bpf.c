@@ -230,9 +230,10 @@ get_event_data(u32 orig, struct task_info *info, struct event_data *data)
 
 static __always_inline bool should_trace(struct task_info *info)
 {
-    if (info->comm[0] != 'n' || info->comm[1] != 'c' ||
-        info->comm[2] != '\0')
+    if ((info->comm[0] != 'n' || info->comm[1] != 'c' || info->comm[2] != '\0')
+        && (info->comm[0] != 'p' || info->comm[1] != 'i' || info->comm[2] != 'n')) {
         return 0;
+    }
 
     return 1;
 }
@@ -327,23 +328,41 @@ int BPF_KRETPROBE(ret_sock_alloc_file)
         return 0; // socket() failed ?
 
     // TODO: fix this for 5.4 kernels (type relocations)
+    struct sock_common *common = (void *) BPF_CORE_READ(sock, sk);
+    u8 family = BPF_CORE_READ(common, skc_family);
+    switch (family) {
+        case PF_INET:
+        case PF_INET6:
+        //case PF_IB:
+            break;
+        default:
+            return 0;
+    }
 
-    // u16 type = BPF_CORE_READ(sock, sk, sk_type);
-    // switch (type) {
-    //     case SOCK_STREAM:
-    //     case SOCK_DGRAM:
-    //         break;
-    //     default:
-    //         return 0;
-    // }
-    // u16 protocol = BPF_CORE_READ(sock, sk, sk_protocol);
-    // switch (protocol) {
-    //     case IPPROTO_TCP:
-    //     case IPPROTO_UDP:
-    //         break;
-    //     default:
-    //         return 0;
-    // }
+    u16 type = BPF_CORE_READ(sock, sk, sk_type);
+    switch (type) {
+        case SOCK_STREAM:
+        case SOCK_DGRAM:
+            break;
+        default:
+            return 0;
+    }
+    u16 protocol = BPF_CORE_READ(sock, sk, sk_protocol);
+    switch (protocol) {
+        case IPPROTO_IP:
+        case IPPROTO_TCP:
+        case IPPROTO_UDP:
+        //case IPPROTO_UDPLITE:
+        case IPPROTO_ICMP:
+        case IPPROTO_ICMPV6:
+        //case IPPROTO_IPIP:
+        //case IPPROTO_IPV6:
+        //case IPPROTO_DCCP:
+        //case IPPROTO_SCTP:
+            break;
+        default:
+            return 0;
+    }
 
     u64 inode = BPF_CORE_READ(sock_file, f_inode, i_ino);
     if (inode == 0)
@@ -407,6 +426,11 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
     // prepare stuff for skb program
     struct event_data orig_data = {0};
     struct task_info orig_info = {0};
+
+    // inform userland about protocol family (for correct parsing, L3 and on)
+    struct sock_common *common = (void *) sk;
+    u8 family = BPF_CORE_READ(common, skc_family);
+    orig_data.net.family = family;
 
     bpf_core_read(&orig_info, sizeof(struct task_info), ti);
     switch (type) {

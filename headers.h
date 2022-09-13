@@ -75,4 +75,27 @@
 #define AF_VSOCK	PF_VSOCK
 #define AF_XDP		PF_XDP
 
+#ifndef IPPROTO_IPIP
+#define IPPROTO_IPIP 4
+#endif
+
+#ifndef IPPROTO_DCCP
+#define IPPROTO_DCCP 33
+#endif
+
+#ifndef IPPROTO_IPV6
+#define IPPROTO_IPV6 41
+#endif
+
+#ifndef IPPROTO_ICMPV6
+#define IPPROTO_ICMPV6 58
+#endif
+
+#endif
+#ifndef IPPROTO_SCTP
+#define IPPROTO_SCTP 132
+#endif
+
+#ifndef IPPROTO_UDPLITE
+#define IPPROTO_UDPLITE 136
 #endif
