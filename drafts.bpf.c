@@ -311,6 +311,10 @@ static __always_inline bool is_socket_supported(struct socket *sock)
     return 1;
 }
 
+//
+// Socket Creation: keep track of created socket inodes per traced task
+//
+
 SEC("kprobe/sock_alloc_file")
 int BPF_KPROBE(sock_alloc_file)
 {
@@ -366,6 +370,9 @@ int BPF_KRETPROBE(ret_sock_alloc_file)
     char *dname = (void *) entry->args[2];
     struct file *sock_file = (void *) PT_REGS_RC(ctx);
 
+    // cleanup entrymap
+    bpf_map_delete_elem(&entrymap, &info.tgid);
+
     if (!sock_file)
         return 0; // socket() failed ?
 
@@ -384,6 +391,10 @@ int BPF_KRETPROBE(ret_sock_alloc_file)
 
     return 0;
 }
+
+//
+// Socket Ingress/Egress eBPF program loader (right before and right after eBPF)
+//
 
 SEC("kprobe/__cgroup_bpf_run_filter_skb")
 int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
@@ -410,6 +421,7 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
     }
 
     struct entry entry = {0};
+    entry.args[0] = PT_REGS_PARM1(ctx); // struct sock *sk
     entry.args[1] = PT_REGS_PARM2(ctx); // struct sk_buff *skb
 
     // prepare for kretprobe using entrymap
@@ -422,8 +434,20 @@ int BPF_KPROBE(__cgroup_bpf_run_filter_skb)
 
     // pick original task from socket inode
     struct task_info *ti = bpf_map_lookup_elem(&inodemap, &inode);
-    if (!ti)
-        return 0;
+    if (!ti) {
+        // if not a traced inode: check if task should be traced...
+        switch (type) {
+            case BPF_CGROUP_INET_EGRESS: // ingress is usually a kernel thread
+               if (should_trace(&info)) {
+                    // ... then update inodemap correlating existing inode <=> task
+                    bpf_map_update_elem(&inodemap, &inode, &info, BPF_ANY);
+                    break;
+                }
+                // do not break here
+            default:
+                return 0;
+        }
+    }
 
     // use skb timestamp as the key for cgroup/skb program context
     u64 skbts = BPF_CORE_READ(skb, tstamp);
@@ -485,7 +509,11 @@ int BPF_KRETPROBE(ret___cgroup_bpf_run_filter_skb)
     if (!entry) // no entry == no tracing
         return 0;
 
+    struct sock *sk = (void *) entry->args[0];
     struct sk_buff *skb = (void *) entry->args[1];
+
+    // cleanup entrymap
+    bpf_map_delete_elem(&entrymap, &info.tgid);
 
     // use skb timestamp as the key for cgroup/skb program context
     u64 skbts = BPF_CORE_READ(skb, tstamp);
@@ -500,6 +528,33 @@ int BPF_KRETPROBE(ret___cgroup_bpf_run_filter_skb)
 
     return 0;
 }
+
+//
+// Type definitions and prototypes for protocol parsing:
+//
+
+typedef union iphdrs_t {
+    struct iphdr iphdr;
+    struct ipv6hdr ipv6hdr;
+} iphdrs;
+
+typedef union protohdrs_t {
+    struct tcphdr tcphdr;
+    struct udphdr udphdr;
+    struct icmphdr icmphdr;
+    struct icmp6hdr icmp6hdr;
+} protohdrs;
+
+static __always_inline u32 cgroup_skb_handle_family(struct __sk_buff *, iphdrs *, protohdrs *);
+static __always_inline u32 cgroup_skb_handle_proto(struct __sk_buff *, iphdrs *, protohdrs *);
+static __always_inline u32 cgroup_skb_handle_proto_tcp(struct __sk_buff *, iphdrs *, protohdrs *);
+static __always_inline u32 cgroup_skb_handle_proto_udp(struct __sk_buff *, iphdrs *, protohdrs *);
+static __always_inline u32 cgroup_skb_handle_proto_icmp(struct __sk_buff *, iphdrs *, protohdrs *);
+static __always_inline u32 cgroup_skb_handle_proto_icmpv6(struct __sk_buff *, iphdrs *, protohdrs *);
+
+//
+// SKB eBPF programs
+//
 
 static __always_inline u32 cgroup_skb_generic(struct __sk_buff *ctx)
 {
@@ -517,7 +572,25 @@ static __always_inline u32 cgroup_skb_generic(struct __sk_buff *ctx)
     // submit event with payload to userland (after event data)
     bpf_perf_event_output(ctx, &perfbuffer, flags, d, sizeof(struct event_data));
 
-    return 1;
+    struct bpf_sock *sk = ctx->sk;
+    if (!sk) {
+        bpf_printk("ERROR: could not get bpf_sock");
+        return 1;
+    }
+
+    sk = bpf_sk_fullsock(sk);
+    if (!sk) {
+        bpf_printk("ERROR: could not get full bpf_sock");
+        return 1;
+    }
+
+    iphdrs iphdrs = {0};
+    protohdrs protohdrs = {0};
+
+    // process protocols and needed events
+    cgroup_skb_handle_family(ctx, &iphdrs, &protohdrs);
+
+    return 1; // allow OR disallow traffic
 }
 
 SEC("cgroup_skb/ingress")
@@ -537,3 +610,186 @@ int cgroup_skb_egress(struct __sk_buff *ctx)
 
     return cgroup_skb_generic(ctx);
 }
+
+// The functions bellow exist so packets can be parsed inside ingress and egress
+// eBPF programs and send specific events, such as DNS QUERY, or HTTP REQUEST.
+
+#define UDP_PORT_DNS 8090 // TODO: change to 53
+#define TCP_PORT_DNS 8090 // TODO: change to 53
+
+// TODO: remove unneededed static inline function arguments
+
+// cgroup_skb_handle_proto_{tcp,udp,icmp}_{dns,http}:
+
+static __always_inline u32 cgroup_skb_handle_proto_tcp_dns(struct __sk_buff *ctx,
+                                                           iphdrs *iphdrs,
+                                                           protohdrs *protohdrs)
+{
+    // TODO: submit DNS event to userland
+
+    bpf_printk("YOU GOT yourself a TCP DNS packet");
+
+    return 0;
+}
+
+static __always_inline u32 cgroup_skb_handle_proto_udp_dns(struct __sk_buff *ctx,
+                                                           iphdrs *iphdrs,
+                                                           protohdrs *protohdrs)
+{
+    // TODO: submit DNS events to userland
+
+    bpf_printk("YOU GOT yourself an UDP DNS packet");
+
+    return 0;
+}
+
+// cgroup_skb_handle_proto_{tcp,udp,icmp}:
+
+static __always_inline u32 cgroup_skb_handle_proto_tcp(struct __sk_buff *ctx,
+                                                       iphdrs *iphdrs,
+                                                       protohdrs *protohdrs)
+{
+    u16 source = bpf_ntohs(protohdrs->tcphdr.source);
+    u16 dest = bpf_ntohs(protohdrs->tcphdr.dest);
+
+    switch (source < dest ? source : dest) {
+        case TCP_PORT_DNS:
+            return cgroup_skb_handle_proto_tcp_dns(ctx, iphdrs, protohdrs);
+    }
+
+    return 0;
+}
+
+static __always_inline u32 cgroup_skb_handle_proto_udp(struct __sk_buff *ctx,
+                                                       iphdrs *iphdrs,
+                                                       protohdrs *protohdrs)
+{
+    u16 source = bpf_ntohs(protohdrs->udphdr.source);
+    u16 dest = bpf_ntohs(protohdrs->udphdr.dest);
+
+    switch (source < dest ? source : dest) {
+        case UDP_PORT_DNS:
+            return cgroup_skb_handle_proto_udp_dns(ctx, iphdrs, protohdrs);
+    }
+
+    return 0;
+}
+
+static __always_inline u32 cgroup_skb_handle_proto_icmp(struct __sk_buff *ctx,
+                                                        iphdrs *iphdrs,
+                                                        protohdrs *protohdrs)
+{
+    return 0;
+}
+
+static __always_inline u32 cgroup_skb_handle_proto_icmpv6(struct __sk_buff *ctx,
+                                                          iphdrs *iphdrs,
+                                                          protohdrs *protohdrs)
+{
+    return 0;
+}
+
+// cgroup_skb_handle_proto:
+
+static __always_inline u32 cgroup_skb_handle_proto(struct __sk_buff *ctx,
+                                                   iphdrs *iphdrs,
+                                                   protohdrs *protohdrs)
+{
+    char *fmt = "ERROR: proto: could not load relative packet bytes";
+
+    void *dest;
+    u32 iphdr_size;
+    u32 protohdr_size;
+
+    // sanity checks for supported protocol families
+    switch (ctx->family) {
+        case PF_INET:
+            if (iphdrs->iphdr.version != 4)
+                return 1;
+            iphdr_size = sizeof(struct iphdr);
+            break;
+        case PF_INET6:
+            if (iphdrs->ipv6hdr.version != 6)
+                return 1;
+            iphdr_size = sizeof(struct ipv6hdr);
+            break;
+        default:
+            return 0; // other families are not an error
+    }
+
+    // load specific protocol headers
+    switch (iphdrs->iphdr.protocol) {
+        case IPPROTO_TCP:
+            dest = &protohdrs->tcphdr;
+            protohdr_size = sizeof(struct tcphdr);
+            break;
+        case IPPROTO_UDP:
+            dest = &protohdrs->udphdr;
+            protohdr_size = sizeof(struct udphdr);
+            break;
+        case IPPROTO_ICMP:
+            dest = &protohdrs->icmphdr;
+            protohdr_size = sizeof(struct icmphdr);
+            break;
+        case IPPROTO_ICMPV6:
+            dest = &protohdrs->icmp6hdr;
+            protohdr_size = sizeof(struct icmp6hdr);
+            break;
+        default:
+            return 0; // other protocols are not an error
+    }
+
+    // load protocol (tcp, udp, icmp) header into its buffer
+    if (bpf_skb_load_bytes_relative(ctx, iphdr_size, dest, protohdr_size, BPF_HDR_START_NET)) {
+        bpf_trace_printk(fmt, sizeof(fmt));
+        return 1;
+    }
+
+    // call appropriate protocol handler
+    switch (iphdrs->iphdr.protocol) {
+        case IPPROTO_TCP:
+            return cgroup_skb_handle_proto_tcp(ctx, iphdrs, protohdrs);
+        case IPPROTO_UDP:
+            return cgroup_skb_handle_proto_udp(ctx, iphdrs, protohdrs);
+        case IPPROTO_ICMP:
+            return cgroup_skb_handle_proto_icmp(ctx, iphdrs, protohdrs);
+        case IPPROTO_ICMPV6:
+            return cgroup_skb_handle_proto_icmpv6(ctx, iphdrs, protohdrs);
+    }
+
+    return 0;
+}
+
+// cgroup_skb_handle_family
+
+static __always_inline u32 cgroup_skb_handle_family(struct __sk_buff *ctx,
+                                                    iphdrs *iphdrs,
+                                                    protohdrs *protohdrs)
+{
+    char *fmt = "ERROR: family: could not load relative packet bytes";
+
+    void *dest;
+    u32 size;
+
+    switch (ctx->family) {
+        case PF_INET:
+            dest = &iphdrs->iphdr;
+            size = sizeof(struct iphdr);
+            break;
+        case PF_INET6:
+            dest = &iphdrs->ipv6hdr;
+            size = sizeof(struct ipv6hdr);
+            break;
+        default:
+            return 0;
+    }
+
+    // load IP header into its buffer
+    if (bpf_skb_load_bytes_relative(ctx, 0, dest, size, BPF_HDR_START_NET)) {
+        bpf_trace_printk(fmt, sizeof(fmt));
+        return 1;
+    }
+
+    return cgroup_skb_handle_proto(ctx, iphdrs, protohdrs);
+}
+
